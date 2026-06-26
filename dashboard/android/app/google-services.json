@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "373633185100",
+    "project_id": "apple-orchard-11ec3",
+    "storage_bucket": "apple-orchard-11ec3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:373633185100:android:3e2e15916a72ecdd58cbe9",
+        "android_client_info": {
+          "package_name": "com.example.dashboard"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyACONsh7Ng8ttrMo6KAu7yVBE5BE3xJAwQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
