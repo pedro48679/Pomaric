@@ -57,7 +57,9 @@ class _TechGridPainter extends CustomPainter {
 
     // 2. Draw subtle grid lines
     final gridPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.015)
+      ..color = AppColors.isDark
+          ? Colors.white.withValues(alpha: 0.015)
+          : Colors.black.withValues(alpha: 0.03)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.5;
 
@@ -82,5 +84,5 @@ class _TechGridPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }

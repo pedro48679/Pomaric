@@ -28,9 +28,9 @@ class _AppleGridViewState extends State<AppleGridView> {
   }
 
   void _updateValidApples() {
-    // Mostra na matriz apenas as maçãs que ainda mantêm todos os seus frames (> 1).
-    // Maçãs limpas pelo script ficaram apenas com 1 frame e não aparecem aqui.
-    _validApples = widget.apples.where((a) => a.frames.length > 2).toList();
+    // Cada maçã grava sempre pelo menos 1 frame (o worst_case, via CNN2
+    // confiante ou CNN5) — basta ter imagem para aparecer na grelha.
+    _validApples = widget.apples.where((a) => a.frames.isNotEmpty).toList();
   }
 
   void _onScroll() {
@@ -82,33 +82,33 @@ class _AppleGridViewState extends State<AppleGridView> {
         // ── ZOOM CONTROLS ──
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: Colors.black12,
-            border: Border(bottom: BorderSide(color: Colors.white10)),
+            border: Border(bottom: BorderSide(color: AppColors.isDark ? Colors.white10 : Colors.black12)),
           ),
           child: Row(
             children: [
-              const Text('Ajustar Vista:', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+              Text('Ajustar Vista:', style: TextStyle(color: AppColors.textSecondary, fontSize: 13, fontWeight: FontWeight.bold)),
               const SizedBox(width: 16),
-              const Icon(Icons.grid_on, color: Colors.white54, size: 18),
+              Icon(Icons.grid_on, color: AppColors.textSecondary, size: 18),
               Expanded(
                 child: Slider(
                   value: _gridExtent,
                   min: 120.0,
                   max: 450.0,
                   activeColor: AppColors.primary,
-                  inactiveColor: Colors.white10,
+                  inactiveColor: AppColors.isDark ? Colors.white10 : Colors.black12,
                   onChanged: (val) => setState(() => _gridExtent = val),
                 ),
               ),
-              const Icon(Icons.crop_square, color: Colors.white54, size: 24),
+              Icon(Icons.crop_square, color: AppColors.textSecondary, size: 24),
               const SizedBox(width: 16),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(6)),
                 child: Text(
                   '${(_gridExtent / 220 * 100).toInt()}%',
-                  style: const TextStyle(color: AppColors.primary, fontSize: 12, fontWeight: FontWeight.bold),
+                  style: TextStyle(color: AppColors.primary, fontSize: 12, fontWeight: FontWeight.bold),
                 ),
               ),
             ],
@@ -141,7 +141,7 @@ class _AppleGridViewState extends State<AppleGridView> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const SizedBox(
+                SizedBox(
                   width: 20,
                   height: 20,
                   child: CircularProgressIndicator(
@@ -153,7 +153,7 @@ class _AppleGridViewState extends State<AppleGridView> {
                 Text(
                   'A carregar mais...',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.5),
+                    color: AppColors.textSecondary,
                     fontSize: 12,
                   ),
                 ),

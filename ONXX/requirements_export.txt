@@ -1,0 +1,10 @@
+torch
+torchvision
+onnx
+onnx-simplifier
+onnxruntime
+onnxruntime-tools
+numpy
+pillow
+psutil
+websockets

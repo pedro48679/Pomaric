@@ -20,17 +20,37 @@ class FrameData {
        _frameIdx = frameIdx;
 
   factory FrameData.fromJson(Map<String, dynamic> json) {
+    // DB format compat
     final label = json['label'] as String? ?? 'Healthy';
     final conf = (json['confidence'] as num?)?.toDouble() ?? 0.0;
+    
+    // Local cache format support
+    Map<String, double>? probs;
+    if (json['probabilities'] != null) {
+      probs = Map<String, double>.from(
+        (json['probabilities'] as Map).map((k, v) => MapEntry(k as String, (v as num).toDouble())),
+      );
+    }
     
     return FrameData(
       id: json['id'] as int? ?? 0,
       url: json['image_url'] as String? ?? '',
-      diseaseSum: label == 'Healthy' ? 0.0 : conf,
-      probabilities: {label: conf},
+      diseaseSum: json['diseaseSum'] != null ? (json['diseaseSum'] as num).toDouble() : (label == 'Healthy' ? 0.0 : conf),
+      probabilities: probs ?? {label: conf},
       isWorstCase: json['is_worst_case'] as bool? ?? false,
       frameIdx: json['frame_idx'] as int? ?? 1,
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'image_url': url,
+      'diseaseSum': diseaseSum,
+      'probabilities': probabilities,
+      'is_worst_case': isWorstCase,
+      'frame_idx': frameIdx,
+    };
   }
 
   FrameData copyWith({
@@ -58,6 +78,7 @@ class Apple {
   final String cnn2Label;
   final double cnn2Confidence;
   final String? _modelName;
+  final List<Map<String, dynamic>> cnnPredictions;
 
   String get modelName => _modelName ?? 'Unknown';
 
@@ -69,6 +90,7 @@ class Apple {
     this.cnn2Label = 'Healthy',
     this.cnn2Confidence = 0.0,
     String? modelName = 'Unknown',
+    this.cnnPredictions = const [],
   }) : _modelName = modelName,
        timestamp = timestamp ?? DateTime.now();
 
@@ -78,31 +100,39 @@ class Apple {
       framesList = (json['frames'] as List).map((e) => FrameData.fromJson(e)).toList();
     }
 
-    // Extrair predição da lista aninhada de cnn_predictions
     String c2Label = 'Healthy';
     double c2Conf = 0.0;
     String model = 'Unknown';
+    final List<Map<String, dynamic>> predsList = [];
     
     if (json['cnn_predictions'] != null) {
       final preds = json['cnn_predictions'] as List;
+      for (final p in preds) {
+        if (p is Map) {
+          predsList.add(Map<String, dynamic>.from(p));
+        }
+      }
       
-      // Tenta procurar por CNN5 primeiro (se houver doença)
-      var pred = preds.firstWhere(
+      var pred = predsList.where(
         (p) => p['model_name'] == 'CNN5' && p['label'] != 'Unknown',
-        orElse: () => null,
-      );
+      ).firstOrNull;
       
-      // Se não encontrar, procura por CNN2 (geralmente healthy)
-      pred ??= preds.firstWhere(
+      pred ??= predsList.where(
         (p) => p['model_name'] == 'CNN2' && p['label'] != 'Unknown',
-        orElse: () => null,
-      );
+      ).firstOrNull;
 
       if (pred != null) {
         c2Label = pred['label'] as String? ?? 'Healthy';
         c2Conf = (pred['confidence'] as num?)?.toDouble() ?? 0.0;
         model = pred['model_name'] as String? ?? 'Unknown';
       }
+    }
+
+    // Local cache fast-path
+    if (json['cnn2Label'] != null) {
+      c2Label = json['cnn2Label'];
+      c2Conf = (json['cnn2Confidence'] as num).toDouble();
+      model = json['modelName'] ?? 'Unknown';
     }
     
     return Apple(
@@ -113,10 +143,24 @@ class Apple {
       cnn2Confidence: c2Conf,
       modelName: model,
       frames: framesList,
+      cnnPredictions: predsList,
     );
   }
 
-  Apple copyWith({List<FrameData>? frames, String? location}) {
+  Map<String, dynamic> toJson() {
+    return {
+      'apple_id': id,
+      'location': location,
+      'timestamp': timestamp.toIso8601String(),
+      'cnn2Label': cnn2Label,
+      'cnn2Confidence': cnn2Confidence,
+      'modelName': modelName,
+      'frames': frames.map((f) => f.toJson()).toList(),
+      'cnn_predictions': cnnPredictions,
+    };
+  }
+
+  Apple copyWith({List<FrameData>? frames, String? location, List<Map<String, dynamic>>? cnnPredictions}) {
     return Apple(
       id: id,
       frames: frames ?? this.frames,
@@ -125,11 +169,15 @@ class Apple {
       cnn2Label: cnn2Label,
       cnn2Confidence: cnn2Confidence,
       modelName: modelName,
+      cnnPredictions: cnnPredictions ?? this.cnnPredictions,
     );
   }
 
   FrameData? get worstFrame {
     if (frames.isEmpty) return null;
+    // Prefere o frame marcado explicitamente como is_worst_case na BD.
+    final marked = frames.where((f) => f.isWorstCase).firstOrNull;
+    if (marked != null) return marked;
     return frames.reduce((a, b) => a.diseaseSum > b.diseaseSum ? a : b);
   }
 
@@ -171,9 +219,7 @@ class Batch {
   final String name;
   final DateTime date;
   final List<Apple> apples;
-  final String location; 
-
-  final double growthRate; 
+  final String location;
 
   Batch({
     required this.id,
@@ -181,8 +227,22 @@ class Batch {
     required this.date,
     required this.apples,
     this.location = 'Pomar Geral',
-    this.growthRate = 0.0,
   });
+
+  /// Tendência de anomalias em pontos percentuais: taxa de não-saudáveis na
+  /// metade mais recente do lote vs. a metade mais antiga (por timestamp).
+  /// Positivo = incidência a aumentar (pior), negativo = a melhorar.
+  double get growthRate {
+    if (apples.length < 4) return 0.0;
+    final sorted = [...apples]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final mid = sorted.length ~/ 2;
+    double anomalyRate(List<Apple> list) {
+      if (list.isEmpty) return 0.0;
+      final sick = list.where((a) => a.primaryCondition != 'Healthy').length;
+      return sick / list.length * 100;
+    }
+    return anomalyRate(sorted.sublist(mid)) - anomalyRate(sorted.sublist(0, mid));
+  }
 
   int get totalApples => apples.length;
 
@@ -244,6 +304,95 @@ class Batch {
 
   @override
   int get hashCode => id.hashCode;
+}
+
+// ---------------------------------------------------------------------------
+// Raspberry Pi 5 Heartbeat
+// ---------------------------------------------------------------------------
+
+class RaspberryHeartbeat {
+  final String deviceId;
+  final DateTime timestamp;
+  final double? cpuTemp;
+  final double? cpuPercent;
+  final double? ramUsedMb;
+  final double? ramTotalMb;
+  final double? diskUsedGb;
+  final double? diskTotalGb;
+  /// 'active' | 'idle' | 'sleep' | 'offline'
+  final String mode;
+  final int? uptimeSeconds;
+  final int inferenceCount;
+  final double? cameraFps;
+  /// Variância de Laplacian do último burst — mede nitidez da lente.
+  final double? lastBlurScore;
+  /// true se [lastBlurScore] < 80 (lente possivelmente suja ou descalibrada).
+  final bool blurWarning;
+
+  RaspberryHeartbeat({
+    required this.deviceId,
+    required this.timestamp,
+    this.cpuTemp,
+    this.cpuPercent,
+    this.ramUsedMb,
+    this.ramTotalMb,
+    this.diskUsedGb,
+    this.diskTotalGb,
+    required this.mode,
+    this.uptimeSeconds,
+    this.inferenceCount = 0,
+    this.cameraFps,
+    this.lastBlurScore,
+    this.blurWarning = false,
+  });
+
+  /// Considera offline se não houve heartbeat nos últimos 15 segundos.
+  bool get isOnline =>
+      mode != 'offline' && DateTime.now().difference(timestamp).inSeconds < 15;
+
+  factory RaspberryHeartbeat.fromJson(Map<String, dynamic> json) {
+    return RaspberryHeartbeat(
+      deviceId: json['device_id'] as String? ?? 'raspberry5',
+      timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+      cpuTemp: (json['cpu_temp'] as num?)?.toDouble(),
+      cpuPercent: (json['cpu_percent'] as num?)?.toDouble(),
+      ramUsedMb: (json['ram_used_mb'] as num?)?.toDouble(),
+      ramTotalMb: (json['ram_total_mb'] as num?)?.toDouble(),
+      diskUsedGb: (json['disk_used_gb'] as num?)?.toDouble(),
+      diskTotalGb: (json['disk_total_gb'] as num?)?.toDouble(),
+      mode: json['mode'] as String? ?? 'idle',
+      uptimeSeconds: (json['uptime_seconds'] as num?)?.toInt(),
+      inferenceCount: (json['inference_count'] as num?)?.toInt() ?? 0,
+      cameraFps: (json['camera_fps'] as num?)?.toDouble(),
+      lastBlurScore: (json['last_blur'] as num?)?.toDouble(),
+      blurWarning: json['blur_warning'] as bool? ?? false,
+    );
+  }
+
+  static RaspberryHeartbeat offline() => RaspberryHeartbeat(
+    deviceId: 'raspberry5',
+    timestamp: DateTime.fromMillisecondsSinceEpoch(0),
+    mode: 'offline',
+  );
+
+  String get ramDisplay {
+    if (ramUsedMb == null || ramTotalMb == null) return '--';
+    final used = (ramUsedMb! / 1024).toStringAsFixed(1);
+    final total = (ramTotalMb! / 1024).toStringAsFixed(1);
+    return '$used / $total GB';
+  }
+
+  String get diskDisplay {
+    if (diskUsedGb == null || diskTotalGb == null) return '--';
+    return '${diskUsedGb!.toStringAsFixed(1)} / ${diskTotalGb!.toStringAsFixed(1)} GB';
+  }
+
+  String get uptimeDisplay {
+    if (uptimeSeconds == null) return '--';
+    final h = uptimeSeconds! ~/ 3600;
+    final m = (uptimeSeconds! % 3600) ~/ 60;
+    return '${h}h ${m}m';
+  }
 }
 
 class ManualAnnotation {
@@ -340,4 +489,77 @@ class CorrectionHistory {
     required this.correctedBy,
     required this.timestamp,
   });
+}
+
+/// Registo da tabela `producao_atual` — resultado final de cada maçã na linha
+/// (classe final, confiança, origem da decisão e thumbnail do frame).
+class ProducaoRecord {
+  final int id;
+  final String appleId;
+  final DateTime timestamp;
+  final String? location;
+  final String finalClass;
+  /// Normalizada para 0.0–1.0.
+  final double finalConfidence;
+  /// Origem da decisão final (ex.: 'IA', 'manual', nome do modelo…).
+  final String finalSource;
+  final String? frameThumbnail;
+
+  ProducaoRecord({
+    required this.id,
+    required this.appleId,
+    required this.timestamp,
+    this.location,
+    required this.finalClass,
+    required this.finalConfidence,
+    required this.finalSource,
+    this.frameThumbnail,
+  });
+
+  /// true se a decisão final veio de um operador humano.
+  bool get isHuman {
+    final s = finalSource.toLowerCase();
+    return s.contains('manual') || s.contains('human') || s.contains('operador');
+  }
+
+  factory ProducaoRecord.fromJson(Map<String, dynamic> json) {
+    final rawConf = (json['final_confidence'] as num?)?.toDouble() ?? 0.0;
+    return ProducaoRecord(
+      id: json['id'] as int? ?? 0,
+      appleId: json['apple_id'] as String? ?? 'APP-?',
+      timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
+      location: json['location'] as String?,
+      finalClass: json['final_class'] as String? ?? 'Healthy',
+      finalConfidence: rawConf > 1.0 ? rawConf / 100.0 : rawConf,
+      finalSource: json['final_source'] as String? ?? 'IA',
+      frameThumbnail: json['frame_thumbnail'] as String?,
+    );
+  }
+}
+
+class Worker {
+  final String id;
+  final String username;
+  final String role;
+  final bool isActive;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+
+  Worker({
+    required this.id,
+    required this.username,
+    required this.role,
+    required this.isActive,
+    required this.createdAt,
+    this.updatedAt,
+  });
+
+  factory Worker.fromJson(Map<String, dynamic> json) => Worker(
+    id: json['id'] as String,
+    username: json['username'] as String,
+    role: json['role'] as String,
+    isActive: json['is_active'] as bool? ?? true,
+    createdAt: DateTime.parse(json['created_at'] as String),
+    updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at'] as String) : null,
+  );
 }

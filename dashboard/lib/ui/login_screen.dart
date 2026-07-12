@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:math';
 import '../providers/auth_provider.dart';
 import '../providers/dashboard_provider.dart';
+import '../widgets/lote_picker_dialog.dart';
 import '../utils/constants.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -15,24 +16,65 @@ class LoginScreen extends ConsumerStatefulWidget {
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
+  bool _isLoading = false;
 
-  void _handleLogin() {
-    final user = _userController.text.trim();
-    if (user.isNotEmpty) {
-      ref.read(authProvider.notifier).login(user, _passController.text);
-      
+  void _handleLogin() async {
+    final username = _userController.text.trim();
+    final password = _passController.text;
+
+    if (username.isEmpty || password.isEmpty) {
+      _showError('Preencha utilizador e palavra-passe');
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final success = await ref.read(authProvider.notifier).login(username, password);
+
+      if (!mounted) return;
+
+      if (!success) {
+        _showError('Utilizador ou palavra-passe inválido');
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      setState(() => _isLoading = false);
+
+      if (!mounted) return;
       final loggedInUser = ref.read(authProvider);
+
       if (loggedInUser != null && loggedInUser.role == UserRole.admin) {
+        // Gestor: vê tudo, todos os lotes agregados — não escolhe lote nenhum.
         ref.read(currentPageProvider.notifier).setPage('Visão Geral');
         ref.read(sessionActiveProvider.notifier).setActive(true);
-        // Provide a default batch for admin to see immediate data
         final batches = ref.read(availableBatchesProvider);
         if (batches.isNotEmpty) ref.read(batchProvider.notifier).setBatch(batches.first);
+        ref.read(currentPageProvider.notifier).setPage('Controlo do Pomar');
       } else {
-        ref.read(currentPageProvider.notifier).setPage('Tapete');
-        // Let operator go through SetupScreen by keeping session active false
+        // Operador: obrigatório escolher o lote da triagem ativa antes de
+        // entrar no Triagem Manual (pode voltar a mudá-lo mais tarde, a partir de lá).
+        // Na vida real, a UI de lote limitaria a um lote, mas aqui deixamos em aberto.
+        await showLotePickerDialog(context, username: username, mandatory: true);
+        if (!mounted) return;
+        ref.read(currentPageProvider.notifier).setPage('Triagem Manual');
       }
+    } catch (e) {
+      if (!mounted) return;
+      _showError('Erro ao fazer login: $e');
+      setState(() => _isLoading = false);
     }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red.shade700,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
@@ -52,34 +94,34 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Icon(Icons.eco, size: 64, color: AppColors.healthy),
+                    Icon(Icons.eco, size: 64, color: AppColors.healthy),
                     const SizedBox(height: 16),
-                    const Text(
+                    Text(
                       'Apple Quality\nPlatform',
                       style: TextStyle(
                         fontSize: 32,
                         fontWeight: FontWeight.bold,
-                        color: Colors.white,
+                        color: AppColors.textPrimary,
                         height: 1.2,
                         letterSpacing: -0.5,
                       ),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 64),
-                    const Text(
+                    Text(
                       'Login (admin ou operator)',
-                      style: TextStyle(color: Colors.white70, fontSize: 13),
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
                       textAlign: TextAlign.left,
                     ),
                     const SizedBox(height: 8),
                     TextField(
                       controller: _userController,
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         filled: true,
                         fillColor: AppColors.surface,
                         hintText: 'Nome de Utilizador',
-                        hintStyle: const TextStyle(color: Colors.white24, fontSize: 14),
+                        hintStyle: TextStyle(color: AppColors.isDark ? Colors.white24 : Colors.black26, fontSize: 14),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
                       ),
@@ -87,13 +129,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: _passController,
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(color: AppColors.textPrimary),
                       obscureText: true,
                       decoration: InputDecoration(
                         filled: true,
                         fillColor: AppColors.surface,
                         hintText: 'Palavra-passe',
-                        hintStyle: const TextStyle(color: Colors.white24, fontSize: 14),
+                        hintStyle: TextStyle(color: AppColors.isDark ? Colors.white24 : Colors.black26, fontSize: 14),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
                       ),
@@ -102,19 +144,26 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.healthy,
-                        foregroundColor: Colors.white,
+                        foregroundColor: AppColors.isDark ? Colors.white : Colors.black,
                         padding: const EdgeInsets.symmetric(vertical: 20),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         elevation: 0,
+                        disabledBackgroundColor: AppColors.healthy.withValues(alpha: 0.5),
                       ),
-                      onPressed: _handleLogin,
-                      child: const Text('Entrar', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      onPressed: _isLoading ? null : _handleLogin,
+                      child: _isLoading
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Entrar', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                     ),
                     const SizedBox(height: 24),
-                    const Text(
+                    Text(
                       'Sistema On-Premise e Cloud',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white24, fontSize: 12),
+                      style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
                     )
                   ],
                 ),
@@ -157,7 +206,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         style: TextStyle(
                           fontSize: 64,
                           fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          color: AppColors.textPrimary,
                           letterSpacing: -1.5,
                           shadows: [
                             Shadow(

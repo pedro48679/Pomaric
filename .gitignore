@@ -1,0 +1,67 @@
+# Ignore everything by default
+*
+
+# Allow directory traversal for allowed folders
+!dashboard/
+!suporte_camera/
+!ONXX/
+!print/
+
+# Allow everything inside the permitted folders
+!dashboard/**
+!suporte_camera/**
+
+# RE-IGNORE SECRETS DENTRO DO DASHBOARD
+dashboard/android/app/google-services.json
+dashboard/ios/Runner/GoogleService-Info.plist
+dashboard/firebase.json
+.env
+
+!print/**
+
+# ...except one-off dev/scratch files inside dashboard/ that add no value
+# to the public repo (encoding-fix scripts, throwaway notes/backups).
+dashboard/fix.py
+dashboard/fix_imports.py
+dashboard/fix_text.py
+dashboard/refactor_batch.py
+dashboard/scratch_layout.txt
+dashboard/scratch_scatter.txt
+dashboard/batch_upgrade.md
+dashboard/REDESIGN_PLAN.md
+dashboard/SPC_CHARTS_BACKUP.md
+
+# Allow specific core files in the root directory
+!.gitignore
+!README.md
+!db_schema.md
+!requirements.txt
+!CNN2.py
+!CNN5.py
+!pipeline_apple_bom.ipynb
+!gradcam_galeria_interativa.py
+!RGBA_format.py
+!split_multi_apple_crops.py
+!scrape_apple_diseases.py
+!supabase_data.py
+!inference_server.py
+!start_all.ps1
+!stop_all.ps1
+
+# Allow specific files in the ONXX folder
+
+!ONXX/export_quantize_onnx.py
+!ONXX/ws_server.py
+!ONXX/raspberry_camera_format.py
+!ONXX/cnn5_watcher.py
+!ONXX/mlops_server.py
+!ONXX/shadow_runner.py
+!ONXX/raspberry.md
+!ONXX/requirements_export.txt
+
+# Bloquear todos os ficheiros .md e .tex em qualquer pasta
+*.md
+*.tex
+
+# Mas permitir a exceção exclusiva para o README principal
+!README.md

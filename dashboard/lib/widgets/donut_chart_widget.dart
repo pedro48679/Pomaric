@@ -38,7 +38,7 @@ class DonutChartWidget extends ConsumerWidget {
       ),
       child: Column(
         children: [
-          const Text(
+          Text(
             'Distribuição do Lote',
             style: TextStyle(
               fontSize: 20,
@@ -106,7 +106,7 @@ class DonutChartWidget extends ConsumerWidget {
                       ),
                       Text(
                         '${batch.totalApples}',
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: AppColors.textPrimary,
                           fontSize: 28,
                           fontWeight: FontWeight.bold,
@@ -155,7 +155,7 @@ class DonutChartWidget extends ConsumerWidget {
                       Text(
                         '$condition (${entry.value})',
                         style: TextStyle(
-                          color: isSelected ? Colors.white : Colors.white70,
+                          color: isSelected ? AppColors.textPrimary : AppColors.textSecondary,
                           fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                         ),
                       ),

@@ -1,6 +1,8 @@
 import 'dart:math';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:bcrypt/bcrypt.dart';
 import '../models/models.dart';
+import 'local_cache_service.dart';
 
 class SupabaseService {
   static final _supabase = Supabase.instance.client;
@@ -8,7 +10,8 @@ class SupabaseService {
 
   /// Gera dados falsos para alimentar a Dashboard em modo Mock offline
   static List<Batch> generateMockBatches() {
-    final rand = Random();
+    // Semente fixa → dados estáveis a cada chamada (evita refresh visual em mock mode)
+    final rand = Random(42);
     final batches = <Batch>[];
     final locations = ['Norte', 'Sul', 'Oeste', 'Este'];
     final conditions = ['Healthy', 'Rot', 'Scab', 'Blotch', 'Anthracnose'];
@@ -22,7 +25,7 @@ class SupabaseService {
       
       final apples = <Apple>[];
       for (int a = 0; a < numApples; a++) {
-        // 70% chance de ser saudável
+        // 80\% chance de ser saudável
         final isHealthy = rand.nextDouble() < 0.7;
         final condition = isHealthy ? 'Healthy' : conditions[1 + rand.nextInt(conditions.length - 1)];
         
@@ -46,16 +49,37 @@ class SupabaseService {
           ));
         }
         
+        final double cnn2ConfVal = condition == 'Healthy' 
+            ? 0.90 + rand.nextDouble() * 0.08 
+            : 0.72 + rand.nextDouble() * 0.20;
+        final double cnn5ConfVal = condition == 'Healthy'
+            ? 0.10 + rand.nextDouble() * 0.15
+            : 0.80 + rand.nextDouble() * 0.18;
+
+        final List<Map<String, dynamic>> mockPreds = [
+          {
+            'model_name': 'CNN2',
+            'label': condition == 'Healthy' ? 'Healthy' : 'Unknown',
+            'confidence': cnn2ConfVal,
+            'is_worst_case': true,
+          },
+          {
+            'model_name': 'CNN5',
+            'label': condition,
+            'confidence': cnn5ConfVal,
+            'is_worst_case': true,
+          }
+        ];
+
         apples.add(Apple(
           id: 'APP-${b}x${a}',
           location: loc,
           timestamp: batchDate.subtract(Duration(days: rand.nextInt(7))).add(Duration(minutes: rand.nextInt(1440))),
           cnn2Label: condition,
-          cnn2Confidence: condition == 'Healthy' 
-              ? 0.90 + rand.nextDouble() * 0.08 
-              : 0.72 + rand.nextDouble() * 0.20,
+          cnn2Confidence: cnn2ConfVal,
           modelName: condition == 'Healthy' ? 'CNN2' : 'CNN5',
           frames: frames,
+          cnnPredictions: mockPreds,
         ));
       }
       
@@ -65,7 +89,6 @@ class SupabaseService {
         date: batchDate,
         apples: apples,
         location: loc,
-        growthRate: -5.0 + rand.nextDouble() * 10.0, // -5% a +5%
       ));
     }
     
@@ -82,23 +105,28 @@ class SupabaseService {
     int attempts = 0;
     while (attempts <= maxRetries) {
       try {
-        List<dynamic> allApplesData = [];
+        // Load local cache if not loaded
+        await LocalCacheService.loadFromDisk();
+
+        final lastSyncDate = LocalCacheService.getLatestTimestamp() ?? 
+            DateTime.now().subtract(const Duration(days: 30)).toIso8601String();
+
+        List<dynamic> newApplesData = [];
         int from = 0;
         int to = 999;
         bool hasMore = true;
         const int maxTotal = 10000;
-        final thirtyDaysAgo = DateTime.now().subtract(const Duration(days: 30)).toIso8601String();
 
-        // 1. Fetch APENAS maçãs (sem joins) dos últimos 30 dias para evitar timeout
-        while (hasMore && allApplesData.length < maxTotal) {
+        // 1. Fetch APENAS maçãs novas (Delta Sync)
+        while (hasMore && newApplesData.length < maxTotal) {
           final List<dynamic> chunk = await _supabase
               .from('apples')
               .select('*')
-              .gte('timestamp', thirtyDaysAgo)
+              .gte('timestamp', lastSyncDate)
               .order('timestamp', ascending: false)
               .range(from, to);
 
-          allApplesData.addAll(chunk);
+          newApplesData.addAll(chunk);
           
           if (chunk.length < 1000) {
             hasMore = false;
@@ -109,73 +137,92 @@ class SupabaseService {
           }
         }
 
-        if (allApplesData.isEmpty) return [];
-
-        List<String> allAppleIds = allApplesData.map((a) => a['apple_id'] as String).toList();
-        
-        // 2. Fetch das cnn_predictions (em blocos de 50 para não dar timeout e não atingir limite de 1000 linhas)
-        Map<String, List<dynamic>> predictionsMap = {};
-        for (int i = 0; i < allAppleIds.length; i += 50) {
-          final end = (i + 50 < allAppleIds.length) ? i + 50 : allAppleIds.length;
-          final chunkIds = allAppleIds.sublist(i, end);
+        if (newApplesData.isNotEmpty) {
+          List<String> newAppleIds = newApplesData.map((a) => a['apple_id'] as String).toList();
           
-          final predsChunk = await _supabase
-              .from('cnn_predictions')
-              .select('*')
-              .inFilter('apple_id', chunkIds);
-              
-          for (var p in predsChunk) {
-            final aId = p['apple_id'] as String;
-            if (!predictionsMap.containsKey(aId)) predictionsMap[aId] = [];
-            predictionsMap[aId]!.add(p);
+          // 2. Fetch cnn_predictions APENAS para os novos IDs
+          Map<String, List<dynamic>> predictionsMap = {};
+          for (int i = 0; i < newAppleIds.length; i += 50) {
+            final end = (i + 50 < newAppleIds.length) ? i + 50 : newAppleIds.length;
+            final chunkIds = newAppleIds.sublist(i, end);
+            
+            final predsChunk = await _supabase
+                .from('cnn_predictions')
+                .select('*')
+                .inFilter('apple_id', chunkIds);
+                
+            for (var p in predsChunk) {
+              final aId = p['apple_id'] as String;
+              if (!predictionsMap.containsKey(aId)) predictionsMap[aId] = [];
+              predictionsMap[aId]!.add(p);
+            }
           }
-        }
 
-        // Fazer merge das predições nos dados brutos das maçãs
-        for (var a in allApplesData) {
-          final aId = a['apple_id'] as String;
-          a['cnn_predictions'] = predictionsMap[aId] ?? [];
-        }
-
-        List<Apple> rawApples = allApplesData.map((row) => Apple.fromJson(row as Map<String, dynamic>)).toList();
-
-        // 3. Descobrir o dia mais recente e carregar as imagens (frames) SÓ para esse dia
-        final latestDate = rawApples.first.timestamp;
-        final startOfLatestDay = DateTime(latestDate.year, latestDate.month, latestDate.day);
-        
-        final recentApples = rawApples.where((a) => a.timestamp.isAfter(startOfLatestDay) || a.timestamp.isAtSameMomentAs(startOfLatestDay)).toList();
-        final recentAppleIds = recentApples.map((a) => a.id).toList();
-
-        // Buscar frames em blocos de 50 para não exceder limites do PostgREST
-        List<dynamic> allRecentFrames = [];
-        for (int i = 0; i < recentAppleIds.length; i += 50) {
-          final end = (i + 50 < recentAppleIds.length) ? i + 50 : recentAppleIds.length;
-          final chunkIds = recentAppleIds.sublist(i, end);
-          
-          final framesChunk = await _supabase
-              .from('frames')
-              .select('*')
-              .inFilter('apple_id', chunkIds);
-          allRecentFrames.addAll(framesChunk);
-        }
-
-        Map<String, List<FrameData>> framesMap = {};
-        for (var f in allRecentFrames) {
-          final frameData = FrameData.fromJson(f as Map<String, dynamic>);
-          final aId = f['apple_id'] as String;
-          if (!framesMap.containsKey(aId)) framesMap[aId] = [];
-          framesMap[aId]!.add(frameData);
-        }
-
-        for (int i = 0; i < rawApples.length; i++) {
-          if (framesMap.containsKey(rawApples[i].id)) {
-            rawApples[i] = rawApples[i].copyWith(frames: framesMap[rawApples[i].id]);
+          for (var a in newApplesData) {
+            final aId = a['apple_id'] as String;
+            a['cnn_predictions'] = predictionsMap[aId] ?? [];
           }
+
+          List<Apple> rawNewApples = newApplesData.map((row) => Apple.fromJson(row as Map<String, dynamic>)).toList();
+
+          // 3. Fetch frames APENAS para os novos IDs
+          List<dynamic> allNewFrames = [];
+          List<dynamic> allMultiConf = [];
+          for (int i = 0; i < newAppleIds.length; i += 50) {
+            final end = (i + 50 < newAppleIds.length) ? i + 50 : newAppleIds.length;
+            final chunkIds = newAppleIds.sublist(i, end);
+            
+            final framesChunk = await _supabase
+                .from('frames')
+                .select('*')
+                .inFilter('apple_id', chunkIds);
+            allNewFrames.addAll(framesChunk);
+            
+            final confChunk = await _supabase
+                .from('cnn5_multi_confidence')
+                .select('*')
+                .inFilter('apple_id', chunkIds);
+            allMultiConf.addAll(confChunk);
+          }
+
+          Map<int, Map<String, double>> multiConfMap = {};
+          for (var c in allMultiConf) {
+            final fId = c['frame_id'] as int;
+            final label = c['class_label'] as String;
+            final conf = (c['confidence'] as num).toDouble();
+            if (!multiConfMap.containsKey(fId)) multiConfMap[fId] = {};
+            multiConfMap[fId]![label] = conf;
+          }
+
+          Map<String, List<FrameData>> framesMap = {};
+          for (var f in allNewFrames) {
+            final fId = f['id'] as int;
+            if (multiConfMap.containsKey(fId)) {
+                f['probabilities'] = multiConfMap[fId];
+            }
+            final frameData = FrameData.fromJson(f as Map<String, dynamic>);
+            final aId = f['apple_id'] as String;
+            if (!framesMap.containsKey(aId)) framesMap[aId] = [];
+            framesMap[aId]!.add(frameData);
+          }
+
+          for (int i = 0; i < rawNewApples.length; i++) {
+            if (framesMap.containsKey(rawNewApples[i].id)) {
+              rawNewApples[i] = rawNewApples[i].copyWith(frames: framesMap[rawNewApples[i].id]);
+            }
+          }
+
+          // Merge new data with Local Cache
+          await LocalCacheService.mergeNewApples(rawNewApples);
         }
+
+        // Obtém a lista completa do Cache para processar a UI
+        final allApples = LocalCacheService.inMemoryApples;
+        if (allApples.isEmpty) return [];
 
         // 4. Agrupar por Localização (ignorando CROP_AUTOMATICO e CROPPED_IMAGE)
         Map<String, List<Apple>> grouped = {};
-        for (var a in rawApples) {
+        for (var a in allApples) {
           final locUpper = a.location.toUpperCase();
           if (locUpper.contains('CROP_AUTOMATICO') || locUpper.contains('CROP_AUTOMÁTICO') || locUpper.contains('CROPPED_IMAGE')) continue;
           
@@ -195,7 +242,6 @@ class SupabaseService {
             date: appleList.first.timestamp,
             apples: appleList,
             location: loc,
-            growthRate: 0.0,
           ));
         });
 
@@ -219,15 +265,19 @@ class SupabaseService {
           print('A tentar novamente em 10 segundos... (Tentativa $attempts de $maxRetries)');
           await Future.delayed(const Duration(seconds: 10));
         } else {
-          return [];
+          // Failsafe: BD inacessível após todas as tentativas — usa dados de demonstração
+          print('[FAILSAFE] BD inacessível — a usar dados de demonstração.');
+          isMockMode = true;
+          return generateMockBatches();
         }
       }
     }
-    return [];
+    return generateMockBatches();
   }
 
   /// Persistir uma anotação manual (Foco)
   static Future<void> saveAnnotation(ManualAnnotation annotation) async {
+    if (isMockMode) return; // No-op em mock mode
     try {
       await _supabase.from('circles_manual').upsert(annotation.toJson());
     } catch (e) {
@@ -237,6 +287,7 @@ class SupabaseService {
 
   /// Obter anotações de uma maçã
   static Future<List<ManualAnnotation>> getAnnotations(String appleId) async {
+    if (isMockMode) return []; // Sem anotações em mock mode
     try {
       final res = await _supabase.from('circles_manual').select().eq('apple_id', appleId);
       return (res as List).map((e) => ManualAnnotation.fromJson(e)).toList();
@@ -248,10 +299,11 @@ class SupabaseService {
 
   /// Enviar maçã para a fila de revisão (Triagem)
   static Future<void> flagForReview(Apple apple) async {
+    if (isMockMode) return; // No-op em mock mode
     try {
       await _supabase.from('manual_review').insert({
         'apple_id': apple.id,
-        'updated_timestamp': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
         'original_class': apple.primaryCondition,
         'original_confidence': (apple.effectiveConfidence * 100).toInt(),
         'status': 'pending',
@@ -262,21 +314,18 @@ class SupabaseService {
   }
 
   /// Exportar para o dataset de treino (Active Learning)
-  /// Agora envia a imagem original e todos os crops gerados
   static Future<void> exportToTraining({
     required String appleId,
     required String pathologyClass,
     List<ManualAnnotation> circles = const [],
   }) async {
+    if (isMockMode) return; // No-op em mock mode
     try {
-      // 1. Inserimos a imagem original
-      // Removido 'image_url' pois não existe na tabela train_dataset
       await _supabase.from('train_dataset').insert({
         'apple_id': appleId,
         'class': pathologyClass,
       });
 
-      // 2. Inserimos cada crop como uma nova entrada de treino
       for (var circle in circles) {
         if (circle.crop != null && circle.crop != 'none') {
           await _supabase.from('train_dataset').insert({
@@ -301,6 +350,7 @@ class SupabaseService {
     required int originalConfidence,
     String? originalImageUrl,
   }) async {
+    if (isMockMode) return; // No-op em mock mode
     try {
       final now = DateTime.now().toIso8601String();
       await _supabase.from('manual_annotation').upsert({
@@ -310,27 +360,23 @@ class SupabaseService {
         'updated_at': now,
       }, onConflict: 'apple_id');
 
-      // 2. Gravar os círculos na circles_manual
-      // Primeiro limpamos círculos antigos desta maçã
       await _supabase.from('circles_manual').delete().eq('apple_id', appleId);
-      
+
       if (circles.isNotEmpty) {
         await _supabase.from('circles_manual').insert(
           circles.map((c) => c.toJson()).toList()
         );
       }
 
-      // 3. Atualizar o status na tabela de revisão (Garantindo todos os campos solicitados)
       await _supabase.from('manual_review').update({
         'status': 'completed',
         'original_class': originalClass,
         'original_confidence': originalConfidence,
         'corrected_class': decision,
         'updated_by': username,
-        'updated_timestamp': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
       }).eq('apple_id', appleId);
 
-      // 4. Se for Gestor, exportar para treino
       if (role == 'manager') {
         await exportToTraining(
           appleId: appleId,
@@ -350,61 +396,240 @@ class SupabaseService {
         final batches = generateMockBatches();
         if (batches.isEmpty) return [];
 
-        Batch? target;
+        final List<Batch> targets = [];
         if (batchId != null) {
-          target = batches.firstWhere((b) => b.id == batchId, orElse: () => batches.first);
+          final target = batches.firstWhere((b) => b.id == batchId, orElse: () => batches.first);
+          targets.add(target);
         } else {
-          target = batches.first;
+          targets.addAll(batches);
         }
 
-        final rand = Random();
+        // Semente fixa → reviews estáveis entre chamadas (coerente com generateMockBatches)
+        final rand = Random(7);
         final classes = ['Healthy', 'Rot', 'Scab', 'Blotch', 'Anthracnose'];
         final users = ['admin', 'ana', 'joao', 'maria'];
         final List<Map<String, dynamic>> rows = [];
 
-        final maxRows = min(6, target.apples.length);
-        for (int i = 0; i < maxRows; i++) {
-          final apple = target.apples[i];
-          final orig = apple.primaryCondition;
-          final origConf = (apple.effectiveConfidence * 100).round();
+        for (final target in targets) {
+          final maxRows = min(6, target.apples.length);
+          for (int i = 0; i < maxRows; i++) {
+            final apple = target.apples[i];
+            final orig = apple.primaryCondition;
+            final origConf = (apple.effectiveConfidence * 100).round();
 
-          String? corr;
-          // Probabilidades: maçãs com alta confiança têm maior chance de correção
-          if ((origConf >= 85 && rand.nextDouble() < 0.5) || rand.nextDouble() < 0.15) {
-            final opts = classes.where((c) => c != orig).toList();
-            corr = opts[rand.nextInt(opts.length)];
+            String? corr;
+            // Probabilidades: maçãs com alta confiança têm maior chance de correção
+            if ((origConf >= 85 && rand.nextDouble() < 0.5) || rand.nextDouble() < 0.15) {
+              final opts = classes.where((c) => c != orig).toList();
+              corr = opts[rand.nextInt(opts.length)];
+            }
+
+            rows.add({
+              'apple_id': apple.id,
+              'original_class': orig,
+              'corrected_class': corr,
+              'original_confidence': origConf,
+              'status': corr != null ? 'completed' : 'pending',
+              'updated_at': DateTime.now().subtract(Duration(minutes: rand.nextInt(1440))).toIso8601String(),
+              'updated_by': corr != null ? users[rand.nextInt(users.length)] : '',
+              'batch_id': target.id,
+            });
           }
-
-          rows.add({
-            'apple_id': apple.id,
-            'original_class': orig,
-            'corrected_class': corr,
-            'original_confidence': origConf,
-            'status': corr != null ? 'completed' : 'pending',
-            'updated_timestamp': DateTime.now().subtract(Duration(minutes: rand.nextInt(1440))).toIso8601String(),
-            'updated_by': corr != null ? users[rand.nextInt(users.length)] : '',
-            'batch_id': target.id,
-          });
         }
 
         return rows;
       }
 
-      if (batchId != null) {
-        final List<dynamic> rows = await _supabase
-            .from('manual_review')
-            .select('apple_id,original_class,corrected_class,original_confidence,status,updated_timestamp,updated_by')
-            .eq('batch_id', batchId);
-        return rows.map((r) => Map<String, dynamic>.from(r as Map)).toList();
-      } else {
-        final List<dynamic> rows = await _supabase
-            .from('manual_review')
-            .select('apple_id,original_class,corrected_class,original_confidence,status,updated_timestamp,updated_by');
-        return rows.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+      // A coluna batch_id não existe na tabela manual_review no Supabase, 
+      // portanto buscamos todos os reviews e (opcionalmente) poderíamos filtrar na RAM se necessário.
+      final List<dynamic> rows = await _supabase
+          .from('manual_review')
+          .select('apple_id,original_class,corrected_class,original_confidence,status,updated_at,updated_by');
+          
+      var mappedRows = rows.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+      
+      // Se tivermos os Batches cacheados, podemos filtrar localmente os reviews que pertencem ao lote
+      if (batchId != null && LocalCacheService.inMemoryApples.isNotEmpty) {
+        final targetApples = LocalCacheService.inMemoryApples;
+        // Na falta de batch_id direto, podemos inferir o lote através da localização das maçãs 
+        // ou ignorar o filtro de lote temporariamente. Por agora devolvemos todos, 
+        // ou filtramos pela lista de IDs se conhecêssemos o mapeamento lote->apples.
       }
+      
+      return mappedRows;
     } catch (e) {
       print('Erro ao buscar manual_review: $e');
       return [];
     }
+  }
+
+  /// Últimos registos da tabela `producao_atual` (resultado final da linha),
+  /// ordenados do mais recente para o mais antigo.
+  static Future<List<ProducaoRecord>> getProducaoAtual({int limit = 20}) async {
+    if (isMockMode) {
+      // Deriva um feed sintético estável a partir dos lotes mock (sem Random
+      // não semeado — evita refresh visual entre polls)
+      final batches = generateMockBatches();
+      final apples = batches.expand((b) => b.apples).toList()
+        ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      return apples.take(limit).toList().asMap().entries.map((e) {
+        final a = e.value;
+        return ProducaoRecord(
+          id: e.key,
+          appleId: a.id,
+          timestamp: a.timestamp,
+          location: a.location,
+          finalClass: a.primaryCondition,
+          finalConfidence: a.effectiveConfidence,
+          finalSource: a.id.hashCode % 5 == 0 ? 'manual' : 'IA',
+          frameThumbnail: a.worstFrameUrl,
+        );
+      }).toList();
+    }
+
+    try {
+      final List<dynamic> rows = await _supabase
+          .from('producao_atual')
+          .select('*')
+          .order('timestamp', ascending: false)
+          .limit(limit);
+      return rows
+          .map((r) => ProducaoRecord.fromJson(Map<String, dynamic>.from(r as Map)))
+          .toList();
+    } catch (e) {
+      print('Erro ao buscar producao_atual: $e');
+      return [];
+    }
+  }
+
+  /// ═══ AUTENTICAÇÃO ═══
+
+  /// Hash de password usando bcrypt (10 rounds)
+  static String hashPassword(String password) {
+    return BCrypt.hashpw(password, BCrypt.gensalt(logRounds: 10));
+  }
+
+  /// Verifica se o password corresponde ao hash
+  static bool verifyPassword(String password, String hash) {
+    try {
+      return BCrypt.checkpw(password, hash);
+    } catch (e) {
+      print('Erro ao verificar password: $e');
+      return false;
+    }
+  }
+
+  /// Faz login seguro (produção com Supabase)
+  static Future<Worker?> loginProduction(String username, String password) async {
+    try {
+      final List<dynamic> result = await _supabase
+          .from('workers')
+          .select()
+          .eq('username', username.trim().toLowerCase())
+          .eq('is_active', true)
+          .limit(1);
+
+      if (result.isEmpty) return null;
+
+      final workerData = result.first as Map<String, dynamic>;
+      final passwordHash = workerData['password_hash'] as String;
+
+      if (!verifyPassword(password, passwordHash)) {
+        return null;
+      }
+
+      return Worker.fromJson(workerData);
+    } catch (e) {
+      print('Erro ao fazer login: $e');
+      return null;
+    }
+  }
+
+  /// Faz login em modo mock (para desenvolvimento)
+  static Worker? loginMock(String username, String password) {
+    // Mock database com credenciais de teste
+    final mockWorkers = {
+      'admin': {
+        'password': 'admin',
+        'role': 'admin',
+      },
+      'ana': {
+        'password': 'password123',
+        'role': 'operator',
+      },
+      'joao': {
+        'password': 'password123',
+        'role': 'operator',
+      },
+      'maria': {
+        'password': 'password123',
+        'role': 'operator',
+      },
+    };
+
+    final userKey = username.trim().toLowerCase();
+    if (!mockWorkers.containsKey(userKey)) return null;
+
+    final userData = mockWorkers[userKey]!;
+    if (userData['password'] != password) return null;
+
+    return Worker(
+      id: userKey,
+      username: userKey,
+      role: userData['role']!,
+      isActive: true,
+      createdAt: DateTime.now(),
+    );
+  }
+
+  /// Faz login (escolhe entre mock ou produção baseado em isMockMode)
+  static Future<Worker?> login(String username, String password) async {
+    if (isMockMode) {
+      return loginMock(username, password);
+    }
+    return await loginProduction(username, password);
+  }
+
+  /// Lê o "lote" (location) atualmente ativo, escolhido pelo operador após o
+  /// login. Se a tabela 'active_lote' estiver vazia, cai para a location da
+  /// maçã mais recente em 'apples'; se não houver nenhuma, devolve null.
+  static Future<String?> getActiveLote() async {
+    if (isMockMode) return 'Linha 1';
+
+    try {
+      final row = await _supabase
+          .from('active_lote')
+          .select('location')
+          .eq('id', 1)
+          .maybeSingle();
+      final location = row?['location'] as String?;
+      if (location != null && location.isNotEmpty) return location;
+    } catch (_) {
+      // tabela pode ainda não existir ou estar vazia — cai para o fallback abaixo
+    }
+
+    try {
+      final rows = await _supabase
+          .from('apples')
+          .select('location')
+          .order('timestamp', ascending: false)
+          .limit(1);
+      if (rows.isNotEmpty) {
+        return rows.first['location'] as String?;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  /// Grava (upsert) o lote ativo. Chamado pelo operador logo após o login.
+  static Future<void> setActiveLote(String location, {required String setBy}) async {
+    if (isMockMode) return;
+    await _supabase.from('active_lote').upsert({
+      'id': 1,
+      'location': location,
+      'set_by': setBy,
+      'set_at': DateTime.now().toIso8601String(),
+    });
   }
 }

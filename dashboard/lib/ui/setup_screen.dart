@@ -54,18 +54,18 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
             children: [
               Text(
                 'Bom dia, ${user.username}!',
-                style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold),
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 32, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 'Em que localizações decorrerá a triagem de hoje?',
-                style: TextStyle(color: Colors.white70, fontSize: 18),
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 18),
               ),
               const SizedBox(height: 32),
               if (availableBatches.isNotEmpty) ...[
-                const Align(
+                Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Lotes Existentes:', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                  child: Text('Lotes Existentes:', style: TextStyle(color: AppColors.textPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
@@ -99,24 +99,24 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                               decoration: BoxDecoration(
-                                color: isSelected ? AppColors.primary.withOpacity(0.1) : Colors.white.withOpacity(0.05),
-                                border: Border.all(color: isSelected ? AppColors.primary : Colors.white10, width: 1.5),
+                                color: isSelected ? AppColors.primary.withOpacity(0.1) : (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.05),
+                                border: Border.all(color: isSelected ? AppColors.primary : (AppColors.isDark ? Colors.white10 : Colors.black12), width: 1.5),
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               child: Row(
                                 children: [
-                                  Icon(Icons.inventory_2, color: isSelected ? AppColors.primary : Colors.white38, size: 20),
+                                  Icon(Icons.inventory_2, color: isSelected ? AppColors.primary : (AppColors.isDark ? Colors.white38 : Colors.black38), size: 20),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        Text(batch.id, style: TextStyle(color: isSelected ? Colors.white : Colors.white70, fontWeight: FontWeight.bold)),
-                                        Text('${batch.totalApples} maçãs inspecionadas', style: TextStyle(color: Colors.white38, fontSize: 10)),
+                                        Text(batch.id, style: TextStyle(color: isSelected ? AppColors.textPrimary : AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                                        Text('${batch.totalApples} maçãs inspecionadas', style: TextStyle(color: AppColors.textSecondary, fontSize: 10)),
                                       ],
                                     ),
                                   ),
-                                  if (isSelected) const Icon(Icons.check_circle, color: AppColors.primary, size: 20),
+                                  if (isSelected) Icon(Icons.check_circle, color: AppColors.primary, size: 20),
                                 ],
                               ),
                             ),
@@ -128,27 +128,27 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                 ),
                 const SizedBox(height: 24),
                 Row(children: [
-                  const Expanded(child: Divider(color: Colors.white10)),
+                  Expanded(child: Divider(color: AppColors.isDark ? Colors.white10 : Colors.black12)),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text('OU', style: TextStyle(color: Colors.white.withOpacity(0.1), fontSize: 12, fontWeight: FontWeight.bold)),
+                    child: Text('OU', style: TextStyle(color: (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.1), fontSize: 12, fontWeight: FontWeight.bold)),
                   ),
-                  const Expanded(child: Divider(color: Colors.white10)),
+                  Expanded(child: Divider(color: AppColors.isDark ? Colors.white10 : Colors.black12)),
                 ]),
                 const SizedBox(height: 24),
               ],
               const SizedBox(height: 32),
-              const Text('Identificação do Lote (RF02):', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+              Text('Identificação do Lote (RF02):', style: TextStyle(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 16),
               Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _blocoController,
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         labelText: 'Bloco (ex: A, B, Norte)',
-                        labelStyle: const TextStyle(color: Colors.white54),
+                        labelStyle: TextStyle(color: AppColors.textSecondary),
                         filled: true,
                         fillColor: Colors.black12,
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
@@ -159,10 +159,10 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                   Expanded(
                     child: TextField(
                       controller: _filaController,
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         labelText: 'Fila (ex: 4, 12, SUL)',
-                        labelStyle: const TextStyle(color: Colors.white54),
+                        labelStyle: TextStyle(color: AppColors.textSecondary),
                         filled: true,
                         fillColor: Colors.black12,
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
@@ -196,12 +196,12 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                         ref.read(sessionActiveProvider.notifier).setActive(true);
                         
                         if (user.role == UserRole.admin) {
-                          ref.read(currentPageProvider.notifier).setPage('Visão Geral');
+                          ref.read(currentPageProvider.notifier).setPage('Controlo do Pomar');
                         } else {
-                          ref.read(currentPageProvider.notifier).setPage('Tapete');
+                          ref.read(currentPageProvider.notifier).setPage('Triagem Manual');
                         }
                       },
-                child: Text('Iniciar Tapete Rolante', style: GoogleFonts.inter(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                child: Text('Iniciar Triagem Manual', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
               ),
             ],
           ),

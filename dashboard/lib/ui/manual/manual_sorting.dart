@@ -6,16 +6,21 @@ import 'package:dashboard/providers/dashboard_provider.dart';
 import 'package:dashboard/providers/auth_provider.dart';
 import 'package:dashboard/utils/constants.dart';
 import 'package:dashboard/services/supabase_service.dart';
+import 'package:dashboard/widgets/lote_picker_dialog.dart';
+import 'package:intl/intl.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:dashboard/services/local_cache_service.dart';
 
-class GradCamOperatorView extends ConsumerStatefulWidget {
-  const GradCamOperatorView({Key? key}) : super(key: key);
+
+
+class ManualSortingView extends ConsumerStatefulWidget {
+  const ManualSortingView({Key? key}) : super(key: key);
 
   @override
-  ConsumerState<GradCamOperatorView> createState() => _GradCamOperatorViewState();
+  ConsumerState<ManualSortingView> createState() => _ManualSortingViewState();
 }
 
-class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
+class _ManualSortingViewState extends ConsumerState<ManualSortingView> {
   List<ManualAnnotation> _activePoints = []; 
   int _selectedPointIndex = 0;
   bool _isSaved = false;
@@ -23,7 +28,9 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
   
   int _selectedTab = 0; // 0 = Principal, 1 = Audit/Histórico
   Set<String> _expandedSections = {}; // Rastreia seções abertas no Gestor
-  
+
+  String? _currentLote; // Lote ativo — só relevante para o operador
+
   @override
   void initState() {
     super.initState();
@@ -35,8 +42,24 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
            _selectedTab = 1;
            _updateExpandedSections();
         });
+      } else {
+        _loadCurrentLote();
       }
     });
+  }
+
+  Future<void> _loadCurrentLote() async {
+    final lote = await SupabaseService.getActiveLote();
+    if (mounted) setState(() => _currentLote = lote);
+  }
+
+  /// Reabre o diálogo de lote — para o operador se enganar no nome, ou
+  /// mudar para um lote diferente a meio da triagem.
+  Future<void> _changeLote() async {
+    final user = ref.read(authProvider);
+    if (user == null) return;
+    final chosen = await showLotePickerDialog(context, username: user.username);
+    if (chosen != null && mounted) setState(() => _currentLote = chosen);
   }
 
   void _updateExpandedSections() {
@@ -280,7 +303,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
           decoration: BoxDecoration(
             color: AppColors.surface.withOpacity(0.8),
-            border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
+            border: Border(bottom: BorderSide(color: (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.05))),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -289,7 +312,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                 children: [
                   if (isAdmin)
                     IconButton(
-                      icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 20),
+                      icon: Icon(Icons.arrow_back_ios_new, color: AppColors.textPrimary, size: 20),
                       onPressed: () => ref.read(currentPageProvider.notifier).state = 'Lote Dashboard',
                     ),
                   if (isAdmin) const SizedBox(width: 16),
@@ -297,39 +320,59 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Centro de Diagnóstico Especializado',
-                        style: GoogleFonts.inter(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: -0.5),
-                      ),
-                      Text(
-                        'Auditoria & Refinamento de IA em Tempo Real',
-                        style: GoogleFonts.inter(fontSize: 14, color: Colors.white38),
+                        'Triagem Humana: Auditoria de Anomalias',
+                        style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textPrimary, letterSpacing: -0.5),
                       ),
                     ],
                   ),
                 ],
               ),
               if (isAdmin)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [AppColors.primary.withValues(alpha: 0.2), AppColors.primary.withValues(alpha: 0.05)]),
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.psychology, color: AppColors.primary, size: 18),
-                      const SizedBox(width: 8),
-                      Text(
-                        'IA + Humano',
-                        style: GoogleFonts.inter(color: AppColors.primary, fontWeight: FontWeight.bold, fontSize: 12),
-                      ),
-                    ],
-                  ),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.sync_problem, color: Colors.orangeAccent),
+                      tooltip: 'Limpar Cache & Sincronizar Tudo',
+                      onPressed: () async {
+                        await LocalCacheService.clearCache();
+                        ref.invalidate(loadDataFutureProvider);
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text('Cache limpo! A descarregar todos os dados novamente do Supabase...'),
+                        ));
+                      },
+                    ),
+                    IconButton(
+                      icon: Icon(AppColors.isDark ? Icons.light_mode : Icons.dark_mode, color: AppColors.textPrimary),
+                      onPressed: () => ref.read(themeProvider.notifier).toggle(),
+                      tooltip: 'Mudar Tema',
+                    ),
+                  ],
                 )
               else
                 Row(
                   children: [
+                    IconButton(
+                      icon: const Icon(Icons.sync_problem, color: Colors.orangeAccent),
+                      tooltip: 'Limpar Cache & Sincronizar Tudo',
+                      onPressed: () async {
+                        await LocalCacheService.clearCache();
+                        ref.invalidate(loadDataFutureProvider);
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text('Cache limpo! A descarregar todos os dados novamente do Supabase...'),
+                        ));
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.location_on_outlined, size: 16),
+                      label: Text(_currentLote != null ? 'Lote: $_currentLote' : 'Escolher lote'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.textPrimary,
+                        side: BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
+                      ),
+                      onPressed: _changeLote,
+                    ),
+                    const SizedBox(width: 8),
                     ElevatedButton.icon(
                       icon: const Icon(Icons.grid_view, size: 16),
                       label: const Text('Grelha'),
@@ -345,8 +388,8 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                       icon: const Icon(Icons.logout, size: 16),
                       label: const Text('Sair'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.white10,
-                        foregroundColor: Colors.white,
+                        backgroundColor: AppColors.isDark ? Colors.white10 : Colors.black12,
+                        foregroundColor: AppColors.textPrimary,
                         elevation: 0,
                       ),
                       onPressed: () => ref.read(authProvider.notifier).logout(),
@@ -361,31 +404,31 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
           child: Row(
             children: [
               Container(
-                width: 250,
-                color: Colors.black26,
+                width: 190,
+                color: AppColors.isDark ? Colors.black26 : Colors.black.withOpacity(0.06),
                 child: Column(
                   children: [
                     if (isAdmin)
                       Padding(
-                        padding: const EdgeInsets.all(12.0),
+                        padding: const EdgeInsets.all(8.0),
                         child: ToggleButtons(
                           isSelected: [_selectedTab == 0, _selectedTab == 1],
                           onPressed: (index) => setState(() => _selectedTab = index),
                           fillColor: AppColors.primary.withOpacity(0.1),
                           selectedColor: AppColors.primary,
-                          color: Colors.white38,
-                          constraints: const BoxConstraints(minWidth: 100, minHeight: 40),
-                          borderRadius: BorderRadius.circular(12),
+                          color: AppColors.textSecondary,
+                          constraints: const BoxConstraints(minWidth: 70, minHeight: 32),
+                          borderRadius: BorderRadius.circular(8),
                           children: const [
-                            Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('Histórico', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold))),
-                            Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('Audit', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold))),
+                            Text('Histórico', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                            Text('Triagem', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
                           ],
                         ),
                       )
                     else 
                       Padding(
                         padding: const EdgeInsets.all(16.0),
-                        child: Text('FILA DE TRIAGEM', style: GoogleFonts.inter(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1.2, fontSize: 12)),
+                        child: Text('FILA DE TRIAGEM', style: GoogleFonts.inter(color: AppColors.textPrimary, fontWeight: FontWeight.bold, letterSpacing: 1.2, fontSize: 12)),
                       ),
                       
                     Expanded(
@@ -458,7 +501,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
   Widget _buildUncertainQueue(List<Apple> apples, {bool shrinkWrap = false}) {
     if (apples.isEmpty) {
       if (shrinkWrap) return const SizedBox.shrink();
-      return const Center(child: Text('Nenhuma maçã pendente.', style: TextStyle(color: Colors.white10), textAlign: TextAlign.center));
+      return Center(child: Text('Nenhuma maçã pendente.', style: TextStyle(color: AppColors.textSecondary), textAlign: TextAlign.center));
     }
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -478,12 +521,12 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
             height: 100,
             decoration: BoxDecoration(
               color: isSelected ? AppColors.primary.withOpacity(0.05) : Colors.black12,
-              border: Border.all(color: isSelected ? AppColors.primary : Colors.white.withOpacity(0.05), width: isSelected ? 2 : 1),
+              border: Border.all(color: isSelected ? AppColors.primary : (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.05), width: isSelected ? 2 : 1),
               borderRadius: BorderRadius.circular(12),
               image: DecorationImage(
                 image: NetworkImage(apple.worstFrameUrl),
                 fit: BoxFit.fill,
-                colorFilter: isSelected ? null : ColorFilter.mode(Colors.black.withOpacity(0.4), BlendMode.darken),
+                colorFilter: isSelected ? null : ColorFilter.mode(Colors.black.withOpacity(AppColors.isDark ? 0.4 : 0.15), BlendMode.darken),
               ),
             ),
             child: Align(
@@ -502,10 +545,14 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      apple.primaryCondition,
-                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    Flexible(
+                      child: Text(
+                        apple.primaryCondition,
+                        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
+                    const SizedBox(width: 4),
                     Text(
                       '${(prob * 100).toStringAsFixed(1)}%',
                       style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w500),
@@ -523,7 +570,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
   Widget _buildHistoryQueue(List<CorrectionHistory> history, String type, {bool shrinkWrap = false}) {
     if (history.isEmpty) {
       if (shrinkWrap) return const SizedBox.shrink();
-      return Center(child: Text('Vazio ($type)', style: TextStyle(color: Colors.white10, fontSize: 11)));
+      return Center(child: Text('Vazio ($type)', style: TextStyle(color: AppColors.textSecondary, fontSize: 11)));
     }
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -541,13 +588,13 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             height: 80,
             decoration: BoxDecoration(
-              color: isSelected ? AppColors.primary.withOpacity(0.1) : Colors.black26,
-              border: Border.all(color: isSelected ? AppColors.primary : Colors.white.withOpacity(0.05), width: isSelected ? 2 : 1),
+              color: isSelected ? AppColors.primary.withOpacity(0.1) : Colors.black.withOpacity(AppColors.isDark ? 0.26 : 0.06),
+              border: Border.all(color: isSelected ? AppColors.primary : (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.05), width: isSelected ? 2 : 1),
               borderRadius: BorderRadius.circular(12),
               image: DecorationImage(
                 image: NetworkImage(item.frameUrl),
                 fit: BoxFit.fill,
-                colorFilter: isSelected ? null : ColorFilter.mode(Colors.black.withOpacity(0.6), BlendMode.darken),
+                colorFilter: isSelected ? null : ColorFilter.mode(Colors.black.withOpacity(AppColors.isDark ? 0.6 : 0.2), BlendMode.darken),
               ),
             ),
             child: Stack(
@@ -570,18 +617,28 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(
-                              item.label,
-                              style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                            Flexible(
+                              flex: 3,
+                              child: Text(
+                                item.label,
+                                style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                            Text(
-                              item.correctedBy,
-                              style: const TextStyle(color: Colors.white70, fontSize: 9, fontWeight: FontWeight.bold),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              flex: 5,
+                              child: Text(
+                                '${DateFormat('HH:mm:ss').format(item.timestamp)} · ${item.batchId}',
+                                style: const TextStyle(color: Colors.white70, fontSize: 9, fontWeight: FontWeight.bold),
+                                textAlign: TextAlign.right,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ],
                         ),
                         if (item.label == 'Outro') 
-                          Text(item.label, style: const TextStyle(color: AppColors.primary, fontSize: 8)),
+                          Text(item.label, style: TextStyle(color: AppColors.isDark ? AppColors.primary : const Color(0xFF00FFC4), fontSize: 8)),
                       ],
                     ),
                   ),
@@ -600,13 +657,14 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
     if (!hasItem) {
       return Text(
         isAdmin ? 'Selecione uma triagem para Auditar.' : 'Selecione uma maçã na Fila de Triagem.', 
-        style: GoogleFonts.inter(color: Colors.white24)
+        style: GoogleFonts.inter(color: AppColors.textSecondary)
       );
     }
 
     final imageUrl = isEditingHistory ? _selectedHistory!.frameUrl : _selectedApple!.worstFrameUrl;
 
     return SingleChildScrollView(
+      physics: const NeverScrollableScrollPhysics(),
       child: Padding(
         padding: const EdgeInsets.all(24.0),
         child: LayoutBuilder(
@@ -619,9 +677,9 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                     ? '${_selectedHistory!.appleId} (Triado por ${_selectedHistory!.correctedBy})' 
                     : _selectedApple!.id,
                   textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold),
+                  style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 14, fontWeight: FontWeight.bold),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 8),
                 
                 Center(
                   child: Column(
@@ -682,7 +740,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                                             height: p.radius * 2,
                                             decoration: BoxDecoration(
                                               shape: BoxShape.circle,
-                                              border: Border.all(color: isSelected ? Colors.white : Colors.white24, width: isSelected ? 2 : 1),
+                                              border: Border.all(color: isSelected ? AppColors.textPrimary : AppColors.textSecondary, width: isSelected ? 2 : 1),
                                               gradient: RadialGradient(
                                                 colors: [
                                                   Colors.redAccent.withOpacity(0.6),
@@ -694,20 +752,25 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                                             child: Stack(
                                               alignment: Alignment.center,
                                               children: [
-                                                const Icon(Icons.pan_tool, color: Colors.white, size: 16),
+                                                Icon(Icons.pan_tool, color: AppColors.textPrimary, size: 16),
+                                                if (isSelected)
+                                                  Positioned(
+                                                    top: p.radius > 40 ? p.radius - 20 : 10,
+                                                    child: Text('Scroll p/ ajustar', style: TextStyle(color: AppColors.textPrimary.withOpacity(0.7), fontSize: 8)),
+                                                  ),
                                                 Positioned(
                                                   bottom: 4,
                                                   child: Container(
                                                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                                    decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
-                                                    child: Text(p.disease, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+                                                    decoration: BoxDecoration(color: AppColors.background.withOpacity(0.8), borderRadius: BorderRadius.circular(4)),
+                                                    child: Text(p.disease, style: TextStyle(color: AppColors.textPrimary, fontSize: 8, fontWeight: FontWeight.bold)),
                                                   ),
                                                 ),
                                                 if (isSelected)
                                                   Positioned(
                                                     top: 0, right: 0,
                                                     child: IconButton(
-                                                      icon: const Icon(Icons.cancel, color: Colors.white, size: 18),
+                                                      icon: Icon(Icons.cancel, color: AppColors.textPrimary, size: 18),
                                                       onPressed: () => _removePoint(idx),
                                                     ),
                                                   ),
@@ -723,39 +786,31 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      if (true) // Tanto Operador como Gestor podem adicionar focos
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            ElevatedButton.icon(
-                              onPressed: _addPoint,
-                              icon: const Icon(Icons.add_circle_outline, size: 18),
-                              label: const Text('Novo Foco'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white.withOpacity(0.05),
-                                foregroundColor: AppColors.primary,
-                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                                side: BorderSide(color: AppColors.primary.withOpacity(0.3)),
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            const Text('Usa scroll para ajustar tamanho do foco', style: TextStyle(color: Colors.white24, fontSize: 10)),
-                          ],
-                        ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 12),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
+                          ElevatedButton.icon(
+                            onPressed: _addPoint,
+                            icon: const Icon(Icons.add_circle_outline, size: 14),
+                            label: const Text('Novo Foco', style: TextStyle(fontSize: 10)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.surface,
+                              foregroundColor: AppColors.primary,
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                              side: BorderSide(color: AppColors.primary.withOpacity(0.3)),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
                           _toggleButton(
                             label: 'CNN Heatmap',
                             icon: Icons.layers,
                             isActive: _showCnnHeatmap,
                             onToggle: () => setState(() => _showCnnHeatmap = !_showCnnHeatmap),
                           ),
-                          const SizedBox(width: 12),
                           if (isAdmin || isEditingHistory) ...[
+                             const SizedBox(width: 8),
                              _toggleButton(
                                label: 'Foco Operador',
                                icon: Icons.radar,
@@ -769,10 +824,10 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                   ),
                 ),
             
-            const SizedBox(height: 32),
-            
-            const Text('Diagnóstico Selecionado:', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             const SizedBox(height: 16),
+            
+            Text('Diagnóstico Selecionado:', style: TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -802,7 +857,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                   },
                   selectedColor: AppColors.healthy,
                   backgroundColor: AppColors.surface,
-                  labelStyle: TextStyle(color: isSel ? Colors.white : Colors.white70),
+                  labelStyle: TextStyle(color: isSel ? AppColors.textPrimary : AppColors.textSecondary),
                 );
               }).toList(),
             ),
@@ -813,12 +868,12 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                 child: TextField(
                   controller: _customLabelController,
                   enabled: true,
-                  style: const TextStyle(color: Colors.white),
+                  style: TextStyle(color: AppColors.textPrimary),
                   decoration: InputDecoration(
                     hintText: 'Descrição da anomalia...',
-                    hintStyle: const TextStyle(color: Colors.white24),
+                    hintStyle: TextStyle(color: AppColors.textSecondary.withOpacity(0.5)),
                     filled: true,
-                    fillColor: Colors.black26,
+                    fillColor: AppColors.surface,
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
@@ -833,16 +888,16 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: isAdmin ? AppColors.primary : AppColors.healthy,
-                    foregroundColor: AppColors.surface, // Dark text for better contrast
-                    padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
+                    foregroundColor: AppColors.textPrimary,
+                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     elevation: 10,
                     shadowColor: (isAdmin ? AppColors.primary : AppColors.healthy).withOpacity(0.5),
                   ),
-                  icon: Icon(isAdmin ? Icons.fact_check : Icons.check_circle, size: 28),
-                  label: Text(
-                    isAdmin ? 'Validar Auditoria e Próximo' : 'Confirmar e Próximo', 
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)
+                  icon: Icon(isAdmin ? Icons.fact_check : Icons.check_circle, size: 24),
+                  label: const Text(
+                    'Confirmar', 
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)
                   ),
                   onPressed: () {
                     final finalLabel = _selectedCorrectionLabel == 'Outro' 
@@ -854,7 +909,6 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                       return;
                     }
 
-                    // Atualiza o label do ponto selecionado se for customizado
                     if (_selectedCorrectionLabel == 'Outro' && _activePoints.isNotEmpty) {
                        final p = _activePoints[_selectedPointIndex];
                        _activePoints[_selectedPointIndex] = ManualAnnotation(
@@ -871,15 +925,11 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                     final currentBatch = ref.read(batchProvider);
                     final appleId = isEditingHistory ? _selectedHistory!.appleId : _selectedApple!.id;
 
-                    // --- PERSISTÊNCIA REAL NO SUPABASE ---
                     final pointsToSave = (_activePoints.length == 1 && !_initialPointModified && !isEditingHistory)
                         ? <ManualAnnotation>[] 
                         : _activePoints.asMap().entries.map((entry) {
                             final idx = entry.key;
                             final p = entry.value;
-                            // Normalizamos as coordenadas para que o processador Python consiga 
-                            // aplicar o crop independentemente da resolução da imagem original.
-                            // Assumindo que o editor é sempre um quadrado (size x size).
                             const double editorSize = 450.0; 
                             return ManualAnnotation(
                               appleId: appleId,
@@ -894,13 +944,11 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
 
                     final primaryImageLabel = pointsToSave.isNotEmpty ? pointsToSave.first.disease : finalLabel;
 
-                    // Tentamos recuperar os dados originais da IA para manter o histórico íntegro
                     final allApples = ref.read(availableBatchesProvider).expand((b) => b.apples).toList();
                     final originalApple = allApples.firstWhere((a) => a.id == appleId, orElse: () => _selectedApple!);
                     final originalClass = originalApple.primaryCondition;
                     final originalConfidence = (originalApple.effectiveConfidence * 100).toInt();
 
-                    // --- PERSISTÊNCIA UNIFICADA NO SUPABASE ---
                     SupabaseService.completeReview(
                       appleId: appleId,
                       decision: primaryImageLabel,
@@ -912,7 +960,6 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                       originalConfidence: originalConfidence,
                     );
 
-                    // 3. Atualizar Estado Local
                     final newHistory = CorrectionHistory(
                       batchId: currentBatch?.id ?? 'unknown',
                       appleId: appleId,
@@ -929,7 +976,7 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                       content: Row(
                         children: [
-                          Icon(isAdmin ? Icons.verified : Icons.cloud_done, color: Colors.white, size: 20),
+                          Icon(isAdmin ? Icons.verified : Icons.cloud_done, color: AppColors.textPrimary, size: 20),
                           const SizedBox(width: 12),
                           Text(isAdmin ? 'Auditoria Finalizada e Exportada para Treino!' : 'Diagnóstico sincronizado com a Central.'),
                         ],
@@ -997,15 +1044,15 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: isActive ? AppColors.primary.withOpacity(0.1) : Colors.white.withOpacity(0.02),
+          color: isActive ? AppColors.primary.withOpacity(0.1) : (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.02),
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: isActive ? AppColors.primary : Colors.white.withOpacity(0.05)),
+          border: Border.all(color: isActive ? AppColors.primary : (AppColors.isDark ? Colors.white.withOpacity(0.05) : Colors.black.withOpacity(0.05))),
         ),
         child: Row(
           children: [
-            Icon(icon, color: isActive ? AppColors.primary : Colors.white24, size: 16),
+            Icon(icon, color: isActive ? AppColors.primary : AppColors.textSecondary, size: 16),
             const SizedBox(width: 8),
-            Text(label, style: TextStyle(color: isActive ? Colors.white : Colors.white24, fontSize: 11, fontWeight: FontWeight.bold)),
+            Text(label, style: TextStyle(color: isActive ? AppColors.textPrimary : AppColors.textSecondary, fontSize: 11, fontWeight: FontWeight.bold)),
           ],
         ),
       ),
@@ -1021,24 +1068,25 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
           color: isOpen ? accentColor.withOpacity(0.08) : Colors.black12,
           border: Border(
             left: BorderSide(color: isOpen ? accentColor : Colors.transparent, width: 4),
-            bottom: BorderSide(color: Colors.white.withOpacity(0.05)),
+            bottom: BorderSide(color: (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.05)),
           ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title, 
-                  style: GoogleFonts.inter(
-                    color: isOpen ? Colors.white : Colors.white38, 
-                    fontSize: 10, 
-                    fontWeight: FontWeight.bold, 
-                    letterSpacing: 1.5
-                  )
-                ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title, 
+                    style: GoogleFonts.inter(
+                      color: isOpen ? AppColors.textPrimary : AppColors.textSecondary, 
+                      fontSize: 10, 
+                      fontWeight: FontWeight.bold, 
+                      letterSpacing: 1.5
+                    )
+                  ),
                 if (isOpen)
                   Container(
                     margin: const EdgeInsets.only(top: 4),
@@ -1051,10 +1099,11 @@ class _GradCamOperatorViewState extends ConsumerState<GradCamOperatorView> {
                   ),
               ],
             ),
+            ),
             AnimatedRotation(
               turns: isOpen ? 0.5 : 0,
               duration: const Duration(milliseconds: 200),
-              child: Icon(Icons.expand_more, color: isOpen ? accentColor : Colors.white24, size: 20),
+              child: Icon(Icons.expand_more, color: isOpen ? accentColor : AppColors.textSecondary, size: 20),
             ),
           ],
         ),

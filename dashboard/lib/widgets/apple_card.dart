@@ -30,8 +30,8 @@ class AppleCard extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Foco de Inferência', style: GoogleFonts.inter(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            Text('ID: $id', style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+            Text('Foco de Inferência', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),
+            Text('ID: $id', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
             const SizedBox(height: 20),
             Expanded(
               child: ClipRRect(
@@ -69,11 +69,11 @@ class AppleCard extends ConsumerWidget {
               children: [
                 Text(
                   'Detalhes: ${apple.id}',
-                  style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                  style: TextStyle(color: AppColors.textPrimary, fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
-                  height: 540, 
+                  height: MediaQuery.of(context).size.height * 0.65 > 540 ? 540 : MediaQuery.of(context).size.height * 0.65,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
@@ -86,112 +86,117 @@ class AppleCard extends ConsumerWidget {
                                                     .replaceFirst('.jpg', '_gradcam.jpg')
                                                     .replaceFirst('.jpeg', '_gradcam.jpeg');
 
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Center(
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: Container(
-                                    width: 280,
-                                    height: 280,
-                                    color: Colors.black26,
-                                    child: Stack(
-                                      children: [
-                                        // Imagem Original (sempre na base para transição limpa)
-                                        HybridImage(
-                                          localUrl: frame.url,
-                                          cloudUrl: null,
-                                          width: 280,
-                                          height: 280,
-                                          fit: BoxFit.cover,
-                                        ),
-                                        // Heatmap Overlay
-                                        if (showHeatmap)
-                                          Positioned.fill(
-                                            child: Image.network(
-                                              gradcamUrl, 
-                                              fit: BoxFit.cover, 
-                                              errorBuilder: (c,e,s) => Container(
-                                                color: Colors.black54,
-                                                child: const Center(child: Text('Heatmap não disponível', style: TextStyle(color: Colors.white24, fontSize: 10)))
-                                              ),
-                                              loadingBuilder: (context, child, loadingProgress) {
-                                                if (loadingProgress == null) return child;
-                                                return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-                                              },
-                                            ),
+                          return SingleChildScrollView(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Center(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: Container(
+                                      width: 280,
+                                      height: 280,
+                                      color: Colors.black26,
+                                      child: Stack(
+                                        children: [
+                                          // Imagem Original (sempre na base para transição limpa)
+                                          HybridImage(
+                                            localUrl: frame.url,
+                                            cloudUrl: null,
+                                            width: 280,
+                                            height: 280,
+                                            fit: BoxFit.cover,
                                           ),
-                                      ],
+                                          // Heatmap Overlay
+                                          if (showHeatmap)
+                                            Positioned.fill(
+                                              child: Image.network(
+                                                gradcamUrl, 
+                                                fit: BoxFit.cover, 
+                                                errorBuilder: (c,e,s) => Container(
+                                                  color: Colors.black54,
+                                                  child: Center(child: Text('Heatmap não disponível', style: TextStyle(color: AppColors.textSecondary, fontSize: 10)))
+                                                ),
+                                                loadingBuilder: (context, child, loadingProgress) {
+                                                  if (loadingProgress == null) return child;
+                                                  return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+                                                },
+                                              ),
+                                            ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(height: 16),
-                              Center(
-                                child: Text(
-                                  'Soma Doença: ${(frame.diseaseSum * 100).toStringAsFixed(1)}%',
-                                  style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold),
+                                const SizedBox(height: 16),
+                                Center(
+                                  child: Text(
+                                    'Soma Doença: ${(frame.diseaseSum * 100).toStringAsFixed(1)}%',
+                                    style: TextStyle(color: AppColors.textSecondary, fontSize: 14, fontWeight: FontWeight.bold),
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 20),
-                              TextButton.icon(
-                                icon: Icon(showHeatmap ? Icons.layers_clear : Icons.layers, color: Colors.orangeAccent, size: 16),
-                                label: Text(showHeatmap ? 'Ocultar Heatmap' : 'Ver Heatmap (Grad-CAM)', style: const TextStyle(color: Colors.orangeAccent, fontSize: 12)),
-                                onPressed: () => setDialogState(() => showHeatmap = !showHeatmap),
-                              ),
-                              const SizedBox(height: 8),
-                              const Text('Probabilidades das Patologias:', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                              const SizedBox(height: 8),
-                              ...frame.probabilities.entries.map((e) => Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: 4.0),
-                                    child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Container(width: 12, height: 12, color: AppColors.getColorForCondition(e.key)),
-                                            const SizedBox(width: 8),
-                                            Text(e.key, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                                          ],
-                                        ),
-                                        Text('${(e.value * 100).toStringAsFixed(1)}%', style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
-                                      ],
-                                    ),
-                                  )),
-                            ],
+                                const SizedBox(height: 20),
+                                TextButton.icon(
+                                  icon: Icon(showHeatmap ? Icons.layers_clear : Icons.layers, color: Colors.orangeAccent, size: 16),
+                                  label: Text(showHeatmap ? 'Ocultar Heatmap' : 'Ver Heatmap (Grad-CAM)', style: const TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+                                  onPressed: () => setDialogState(() => showHeatmap = !showHeatmap),
+                                ),
+                                const SizedBox(height: 8),
+                                Text('Probabilidades das Patologias:', style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 8),
+                                ...frame.probabilities.entries.where((e) => e.value > 0.05).map((e) => Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 4.0),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Container(width: 12, height: 12, color: AppColors.getColorForCondition(e.key)),
+                                              const SizedBox(width: 8),
+                                              Text(e.key, style: TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+                                            ],
+                                          ),
+                                          Text('${(e.value * 100).toStringAsFixed(1)}%', style: TextStyle(color: AppColors.textPrimary, fontSize: 13, fontWeight: FontWeight.bold)),
+                                        ],
+                                      ),
+                                    )),
+                              ],
+                            ),
                           );
                         },
                       ),
-                      Positioned(
-                        left: 0,
-                        top: 120, 
-                        child: IconButton(
-                          icon: const Icon(Icons.chevron_left, color: Colors.white, size: 40),
-                          onPressed: () {
-                            pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
-                          },
+                      if (apple.frames.length > 1)
+                        Positioned(
+                          left: 0,
+                          top: 120,
+                          child: IconButton(
+                            icon: Icon(Icons.chevron_left, color: AppColors.textPrimary, size: 40),
+                            onPressed: () {
+                              pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
+                            },
+                          ),
                         ),
-                      ),
-                      Positioned(
-                        right: 0,
-                        top: 120,
-                        child: IconButton(
-                          icon: const Icon(Icons.chevron_right, color: Colors.white, size: 40),
-                          onPressed: () {
-                            pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
-                          },
+                      if (apple.frames.length > 1)
+                        Positioned(
+                          right: 0,
+                          top: 120,
+                          child: IconButton(
+                            icon: Icon(Icons.chevron_right, color: AppColors.textPrimary, size: 40),
+                            onPressed: () {
+                              pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
+                            },
+                          ),
                         ),
-                      ),
                     ],
                   ),
                 ),
-                const Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: 8.0),
-                    child: Text('Swipe para mais frames', style: TextStyle(color: Colors.white54, fontSize: 11, fontStyle: FontStyle.italic)),
+                if (apple.frames.length > 1)
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Text('Swipe para mais frames', style: TextStyle(color: AppColors.textSecondary, fontSize: 11, fontStyle: FontStyle.italic)),
+                    ),
                   ),
-                ),
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
@@ -262,7 +267,7 @@ class AppleCard extends ConsumerWidget {
                           isForced 
                             ? Icons.priority_high 
                             : (isHealthy ? Icons.check : Icons.warning_amber_rounded), 
-                          color: Colors.white, 
+                          color: AppColors.textPrimary, 
                           size: 16
                         ),
                       ),
@@ -281,8 +286,15 @@ class AppleCard extends ConsumerWidget {
                 children: [
                   Text(
                     apple.id,
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 11),
+                    style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 11),
                   ),
+                  if ((apple.worstFrame?.probabilities.length ?? 0) > 1) ...[
+                    const SizedBox(height: 4),
+                    ...apple.worstFrame!.probabilities.entries.where((e) => e.value > 0.05).map((e) => Text(
+                      '${e.key}: ${(e.value * 100).toStringAsFixed(1)}%',
+                      style: TextStyle(color: AppColors.getColorForCondition(e.key), fontSize: 9, fontWeight: FontWeight.bold),
+                    )),
+                  ],
                   const SizedBox(height: 6),
                   ProbabilityBar(probabilities: apple.worstFrame?.probabilities ?? {apple.primaryCondition: apple.effectiveConfidence}),
                 ],

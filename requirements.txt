@@ -1,0 +1,16 @@
+# PC-side pipeline: training (CNN2.py/CNN5.py), inference_server.py, ws_server.py,
+# cnn5_watcher.py, mlops_server.py, shadow_runner.py, RGBA_format.py, Grad-CAM tooling.
+#
+# Raspberry Pi (edge) has a lighter, separate set of dependencies — see
+# ONXX/requirements_export.txt and ONXX/raspberry.md.
+
+torch
+torchvision
+numpy
+opencv-python
+pillow
+matplotlib
+onnxruntime
+rembg
+websockets
+supabase

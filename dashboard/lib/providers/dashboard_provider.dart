@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import '../models/models.dart';
 import '../services/supabase_service.dart';
+import '../services/local_cache_service.dart';
+import '../utils/constants.dart';
 
 class AvailableBatchesNotifier extends Notifier<List<Batch>> {
   @override
@@ -14,6 +18,31 @@ class AvailableBatchesNotifier extends Notifier<List<Batch>> {
 }
 
 final availableBatchesProvider = NotifierProvider<AvailableBatchesNotifier, List<Batch>>(AvailableBatchesNotifier.new);
+
+class DateRangeFilterNotifier extends Notifier<String> {
+  @override
+  String build() => '30d';
+
+  void setRange(String range) {
+    state = range;
+  }
+}
+
+final dateRangeFilterProvider = NotifierProvider<DateRangeFilterNotifier, String>(DateRangeFilterNotifier.new);
+
+final filteredBatchesProvider = Provider<List<Batch>>((ref) {
+  final allBatches = ref.watch(availableBatchesProvider);
+  final range = ref.watch(dateRangeFilterProvider);
+  
+  if (allBatches.isEmpty) return [];
+  
+  final now = DateTime.now();
+  final threshold = range == '7d' 
+      ? now.subtract(const Duration(days: 7)) 
+      : now.subtract(const Duration(days: 30));
+      
+  return allBatches.where((b) => b.date.isAfter(threshold)).toList();
+});
 
 final loadDataFutureProvider = FutureProvider<void>((ref) async {
   final batches = await SupabaseService.getBatches();
@@ -29,20 +58,30 @@ class BatchNotifier extends Notifier<Batch?> {
   @override
   Batch? build() {
     ref.onDispose(() => _timer?.cancel());
-    return null; 
+    return null;
   }
-  
+
+  Batch _todayOnly(Batch b) {
+    // Como os dados da cache podem ser de dias anteriores (ex: ontem),
+    // remover o filtro restrito de "hoje" permite ver os dados no Lote Dashboard.
+    // Em produção, se quiseres ver apenas hoje, podes repor o filtro.
+    return b;
+  }
+
   void setBatch(Batch batch) {
-    state = batch;
+    state = _todayOnly(batch);
     ref.read(selectedConditionFilterProvider.notifier).resetFilter();
     _startSimulation();
   }
 
   void _startSimulation() {
     _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+    // Em mock mode o intervalo é maior — dados já estáveis, evita re-renders desnecessários
+    final interval = SupabaseService.isMockMode
+        ? const Duration(seconds: 60)
+        : const Duration(seconds: 5);
+    _timer = Timer.periodic(interval, (timer) async {
       try {
-        // Pull fresh data from Supabase periodically instead of mocking
         final newBatches = await SupabaseService.getBatches();
         ref.read(availableBatchesProvider.notifier).setBatches(newBatches);
         
@@ -50,7 +89,7 @@ class BatchNotifier extends Notifier<Batch?> {
           // Try to keep the same batch selected, but updated
           final updatedBatch = newBatches.where((b) => b.id == state!.id).firstOrNull;
           if (updatedBatch != null) {
-            state = updatedBatch;
+            state = _todayOnly(updatedBatch);
           }
         }
       } catch (e) {
@@ -81,7 +120,20 @@ class BatchNotifier extends Notifier<Batch?> {
       name: state!.name,
       date: state!.date,
       apples: updatedApples,
+      location: state!.location,
     );
+
+    // 1. Update the cache on disk immediately
+    LocalCacheService.updateAppleInCache(appleId, newLabel);
+
+    // 2. Update availableBatchesProvider to prevent reversion on the next timer poll
+    final updatedBatches = ref.read(availableBatchesProvider).map((b) {
+      if (b.id == state!.id) {
+        return state!;
+      }
+      return b;
+    }).toList();
+    ref.read(availableBatchesProvider.notifier).setBatches(updatedBatches);
   }
 }
 
@@ -110,8 +162,12 @@ final filteredApplesProvider = Provider<List<Apple>>((ref) {
 
   if (batch == null) return [];
   
-  // Filtramos apenas maçãs que já tenham pelo menos 1 frame (evita erros de sincronismo na BD)
-  final validApples = batch.apples.where((a) => a.frames.isNotEmpty).toList();
+  // Filtramos maçãs com pelo menos 1 frame com imagem real no Storage.
+  // Maçãs antigas importadas (image_url=NULL) ficam fora da grelha
+  // mas continuam nos dados para gráficos e KPIs.
+  final validApples = batch.apples
+      .where((a) => a.frames.any((f) => f.url.isNotEmpty))
+      .toList();
 
   if (activeFilters.isEmpty) return validApples;
 
@@ -120,7 +176,7 @@ final filteredApplesProvider = Provider<List<Apple>>((ref) {
 
 class CurrentPageNotifier extends Notifier<String> {
   @override
-  String build() => 'Tapete'; 
+  String build() => 'Controlo do Pomar'; 
   
   void setPage(String page) {
     state = page;
@@ -172,11 +228,11 @@ final uncertainApplesProvider = Provider<List<Apple>>((ref) {
     
     if (primaryCond == 'Healthy') return false;
     
-    // Regra: Incerteza real < 70%
-    if (prob < 0.70) return true;
+    // Regra: Incerteza real < 80%
+    if (prob < 0.80) return true;
     
-    // Regra: Auditoria de qualidade (5% das imagens entre 70% e 80%)
-    if (prob < 0.80) {
+    // Regra: Auditoria de qualidade (5% das imagens entre 80% e 85%)
+    if (prob < 0.85) {
       return (apple.id.hashCode % 100) < 5;
     }
     
@@ -201,6 +257,26 @@ class CorrectionHistoryNotifier extends Notifier<List<CorrectionHistory>> {
 }
 
 final correctionHistoryProvider = NotifierProvider<CorrectionHistoryNotifier, List<CorrectionHistory>>(CorrectionHistoryNotifier.new);
+
+/// Registos de `manual_review` (todas as validações humanas).
+/// Fonte única para a matriz de confusão, o gráfico de calibração e o KPI de
+/// fila humana — evita queries duplicadas. Refaz o fetch sempre que uma nova
+/// correção é registada na sessão.
+final manualReviewsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  ref.watch(correctionHistoryProvider);
+  return SupabaseService.getManualReviews();
+});
+
+/// Feed da tabela `producao_atual` — últimos resultados finais da linha.
+/// Polling: 10s em produção, 60s em mock (dados estáveis).
+final producaoAtualProvider = FutureProvider.autoDispose<List<ProducaoRecord>>((ref) async {
+  final interval = SupabaseService.isMockMode
+      ? const Duration(seconds: 60)
+      : const Duration(seconds: 10);
+  final timer = Timer(interval, () => ref.invalidateSelf());
+  ref.onDispose(timer.cancel);
+  return SupabaseService.getProducaoAtual();
+});
 
 /// Confiança média do lote: 1 - diseaseSum (em percentagem)
 final avgConfidenceProvider = Provider<double>((ref) {
@@ -258,8 +334,9 @@ class GlobalStats {
 }
 
 final globalStatsProvider = Provider<GlobalStats?>((ref) {
-  final allBatches = ref.watch(availableBatchesProvider);
+  final allBatches = ref.watch(filteredBatchesProvider);
   final corrections = ref.watch(correctionHistoryProvider);
+  final reviewsAsync = ref.watch(manualReviewsProvider);
 
   if (allBatches.isEmpty) return null;
 
@@ -327,8 +404,16 @@ final globalStatsProvider = Provider<GlobalStats?>((ref) {
   final d2 = groupApproval(dailyBatches.sublist(mid > dailyBatches.length ? dailyBatches.length : mid));
   final delta = d2 - d1;
 
-  final int humanQ = (totalApples * 0.045).toInt() - corrections.length;
-  final humanQueue = humanQ < 0 ? 0 : humanQ;
+  // Fila humana real: contagem de manual_review pendentes. Enquanto a query
+  // não devolve dados (loading/erro), usa a heurística de amostragem (4,5%).
+  final reviews = reviewsAsync.value;
+  final int humanQueue;
+  if (reviews != null) {
+    humanQueue = reviews.where((r) => (r['status'] as String? ?? '') == 'pending').length;
+  } else {
+    final int humanQ = (totalApples * 0.045).toInt() - corrections.length;
+    humanQueue = humanQ < 0 ? 0 : humanQ;
+  }
   final surgeAlert = gDom == 'Nenhuma' || gDom == 'Healthy' ? 'Estável' : '$gDom (+14%)';
   final automationRate = totalApples > 0 ? ((totalApples - corrections.length - humanQueue) / totalApples) * 100 : 0.0;
 
@@ -388,4 +473,200 @@ final batchStatsProvider = Provider<BatchStats?>((ref) {
     approvalRate: approvalRate,
   );
 });
+
+class ThemeNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  void toggle() {
+    state = !state;
+  }
+}
+
+final themeProvider = NotifierProvider<ThemeNotifier, bool>(ThemeNotifier.new);
+
+class BatchTriagemFilterNotifier extends Notifier<String> {
+  @override
+  String build() => '5t';
+  void setFilter(String f) => state = f;
+}
+final batchTriagemFilterProvider = NotifierProvider<BatchTriagemFilterNotifier, String>(BatchTriagemFilterNotifier.new);
+
+class DismissedOutbreaksNotifier extends Notifier<Set<String>> {
+  @override
+  Set<String> build() => {};
+
+  void dismiss(String batchId) {
+    state = {...state, batchId};
+  }
+
+  void reset() {
+    state = {};
+  }
+}
+
+final dismissedOutbreaksProvider = NotifierProvider<DismissedOutbreaksNotifier, Set<String>>(DismissedOutbreaksNotifier.new);
+
+class OutbreaksPopupDismissedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void setDismissed(bool value) {
+    state = value;
+  }
+}
+
+final outbreaksPopupDismissedProvider = NotifierProvider<OutbreaksPopupDismissedNotifier, bool>(
+  OutbreaksPopupDismissedNotifier.new,
+);
+
+// ---------------------------------------------------------------------------
+// Raspberry Pi 5 Heartbeat Provider
+// Faz polling a http://localhost:8766/heartbeat a cada 5 segundos.
+// O ws_server.py serve esse endpoint com o último heartbeat recebido do Pi.
+// ---------------------------------------------------------------------------
+
+final raspberryHeartbeatProvider = FutureProvider.autoDispose<RaspberryHeartbeat>((ref) async {
+  final timer = Timer(const Duration(seconds: 5), () => ref.invalidateSelf());
+  ref.onDispose(timer.cancel);
+
+  // Mock: devolve um heartbeat simulado (Pi ligado e ativo)
+  if (SupabaseService.isMockMode) {
+    await Future.delayed(const Duration(milliseconds: 200));
+    return RaspberryHeartbeat(
+      deviceId: 'pi5-mock',
+      timestamp: DateTime.now(),
+      cpuTemp: 52.3,
+      cpuPercent: 18.5,
+      ramUsedMb: 1823,
+      ramTotalMb: 4096,
+      diskUsedGb: 14.2,
+      diskTotalGb: 64.0,
+      mode: 'active',
+      uptimeSeconds: 86400,
+      inferenceCount: 1247,
+      cameraFps: 4.2,
+      lastBlurScore: 312.5,
+      blurWarning: false,
+    );
+  }
+
+  try {
+    final response = await http
+        .get(Uri.parse(AppConstants.heartbeatUrl))
+        .timeout(const Duration(seconds: 3));
+    if (response.statusCode == 200) {
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      if (json['status'] == 'offline') return RaspberryHeartbeat.offline();
+      return RaspberryHeartbeat.fromJson(json);
+    }
+  } catch (_) {}
+  return RaspberryHeartbeat.offline();
+});
+
+// ---------------------------------------------------------------------------
+// Configuração da câmara — partilhada entre o painel de sliders e o botão RESTART
+// ---------------------------------------------------------------------------
+
+class CameraConfig {
+  final double lensPosition;   // dpt (0 = autofocus)
+  final double shutterUs;      // µs de exposição
+  final double burst;          // n.º de fotos em rajada
+  final double burstInterval;  // ms entre fotos
+  final double motionThreshold;// sensibilidade ao movimento (px)
+  final double triggerDelay;   // segundos após deteção de movimento
+  final double sharpness;
+  final double contrast;
+  final double saturation;
+  final double noiseReduction; // 0-4
+
+  const CameraConfig({
+    this.lensPosition = 0.0,
+    this.shutterUs = 8000,
+    this.burst = 1,
+    this.burstInterval = 150,
+    this.motionThreshold = 12,
+    this.triggerDelay = 0.1,
+    this.sharpness = 1.5,
+    this.contrast = 1.2,
+    this.saturation = 1.2,
+    this.noiseReduction = 1,
+  });
+
+  CameraConfig copyWith({
+    double? lensPosition, double? shutterUs, double? burst, double? burstInterval,
+    double? motionThreshold, double? triggerDelay, double? sharpness,
+    double? contrast, double? saturation, double? noiseReduction,
+  }) => CameraConfig(
+    lensPosition: lensPosition ?? this.lensPosition,
+    shutterUs: shutterUs ?? this.shutterUs,
+    burst: burst ?? this.burst,
+    burstInterval: burstInterval ?? this.burstInterval,
+    motionThreshold: motionThreshold ?? this.motionThreshold,
+    triggerDelay: triggerDelay ?? this.triggerDelay,
+    sharpness: sharpness ?? this.sharpness,
+    contrast: contrast ?? this.contrast,
+    saturation: saturation ?? this.saturation,
+    noiseReduction: noiseReduction ?? this.noiseReduction,
+  );
+
+  Map<String, dynamic> toFlags() => {
+    '--lens-position': double.parse(lensPosition.toStringAsFixed(2)),
+    '--shutter-us': shutterUs.round(),
+    '--burst': burst.round(),
+    '--burst-interval': burstInterval.round(),
+    '--motion-threshold': motionThreshold.round(),
+    '--trigger-delay': double.parse(triggerDelay.toStringAsFixed(2)),
+    '--sharpness': double.parse(sharpness.toStringAsFixed(1)),
+    '--contrast': double.parse(contrast.toStringAsFixed(1)),
+    '--saturation': double.parse(saturation.toStringAsFixed(1)),
+    '--noise-reduction': noiseReduction.round(),
+  };
+}
+
+class CameraConfigNotifier extends Notifier<CameraConfig> {
+  @override
+  CameraConfig build() => const CameraConfig();
+
+  void update(CameraConfig Function(CameraConfig) fn) => state = fn(state);
+}
+
+final cameraConfigProvider =
+    NotifierProvider<CameraConfigNotifier, CameraConfig>(CameraConfigNotifier.new);
+
+// ---------------------------------------------------------------------------
+// Shadow CNN — estado global (badge persistente no header, visível em
+// qualquer página, independente de a página MLOps estar aberta).
+// Faz polling a /shadow/status a cada 10s enquanto o header estiver visível.
+// ---------------------------------------------------------------------------
+final shadowGlobalStatusProvider = FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
+  final timer = Timer(const Duration(seconds: 10), () => ref.invalidateSelf());
+  ref.onDispose(timer.cancel);
+
+  if (SupabaseService.isMockMode) {
+    return {'state': 'idle', 'model': null, 'apples_processed': 0};
+  }
+  try {
+    final r = await http
+        .get(Uri.parse('${AppConstants.mlopsUrl}/shadow/status'))
+        .timeout(const Duration(seconds: 4));
+    if (r.statusCode == 200) {
+      return jsonDecode(r.body) as Map<String, dynamic>;
+    }
+  } catch (_) {}
+  return {'state': 'idle', 'model': null, 'apples_processed': 0};
+});
+
+class HeaderVisibleNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  void setVisible(bool visible) {
+    if (state != visible) {
+      state = visible;
+    }
+  }
+}
+
+final headerVisibleProvider = NotifierProvider<HeaderVisibleNotifier, bool>(HeaderVisibleNotifier.new);
 
