@@ -1,7 +1,6 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../models/models.dart';
 import '../providers/dashboard_provider.dart';
 import '../utils/constants.dart';
 
@@ -18,9 +17,9 @@ class DonutChartWidget extends ConsumerWidget {
     final distribution = batch.healthDistribution;
     final Map<String, int> activeDistribution = {};
     
-    // remove zero values
+    // remove zero values and lixo
     distribution.forEach((key, value) {
-      if (value > 0) activeDistribution[key] = value;
+      if (value > 0 && key.toLowerCase() != 'lixo') activeDistribution[key] = value;
     });
 
     return Container(
@@ -80,11 +79,12 @@ class DonutChartWidget extends ConsumerWidget {
                       final isSelected = activeFilters.contains(condition);
                       final radius = isSelected ? 50.0 : 40.0;
                       final color = AppColors.getColorForCondition(condition);
+                      final pct = (count / batch.totalApples) * 100;
 
                       return PieChartSectionData(
                         color: color,
                         value: count.toDouble(),
-                        title: '${((count / batch.totalApples) * 100).toStringAsFixed(1)}%',
+                        title: pct >= 0.5 ? '${pct.toStringAsFixed(1)}%' : '',
                         radius: radius,
                         titleStyle: TextStyle(
                           fontSize: isSelected ? 18.0 : 14.0,

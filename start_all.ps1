@@ -20,8 +20,8 @@
 #>
 param(
     [string]$Device = "windows",
-    [string]$ImageDir = "$PSScriptRoot\..\TempRaspberry\Imagens",
-    [string]$JsonDir = "$PSScriptRoot\..\TempRaspberry\Jsonn"
+    [string]$ImageDir = "C:\auditoria_logs\Imagens",
+    [string]$JsonDir = "C:\auditoria_logs\Jsonn"
 )
 
 $ErrorActionPreference = "Stop"

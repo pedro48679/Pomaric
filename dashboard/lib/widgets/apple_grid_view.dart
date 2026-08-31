@@ -4,21 +4,25 @@ import '../models/models.dart';
 import 'apple_card.dart';
 import '../utils/constants.dart';
 
-class AppleGridView extends StatefulWidget {
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/dashboard_provider.dart';
+
+class AppleGridView extends ConsumerStatefulWidget {
   final List<Apple> apples;
 
   const AppleGridView({Key? key, required this.apples}) : super(key: key);
 
   @override
-  State<AppleGridView> createState() => _AppleGridViewState();
+  ConsumerState<AppleGridView> createState() => _AppleGridViewState();
 }
 
-class _AppleGridViewState extends State<AppleGridView> {
+class _AppleGridViewState extends ConsumerState<AppleGridView> {
   final ScrollController _scrollController = ScrollController();
   int _visibleCount = 24; // Aprox. 6 linhas iniciais (4 por linha)
   bool _isLoadingMore = false;
   late List<Apple> _validApples;
   double _gridExtent = 220.0;
+  int _multiClassCount = 0;
 
   @override
   void initState() {
@@ -28,9 +32,21 @@ class _AppleGridViewState extends State<AppleGridView> {
   }
 
   void _updateValidApples() {
-    // Cada maçã grava sempre pelo menos 1 frame (o worst_case, via CNN2
-    // confiante ou CNN5) — basta ter imagem para aparecer na grelha.
-    _validApples = widget.apples.where((a) => a.frames.isNotEmpty).toList();
+    _multiClassCount = 0;
+    _validApples = widget.apples.where((a) {
+      if (a.frames.isEmpty) return false;
+      
+      int activePathologies = 0;
+      final probs = a.worstFrame?.probabilities ?? {};
+      for (var p in probs.values) {
+        if (p > 0.05) activePathologies++;
+      }
+      
+      final isMultiClass = activePathologies >= 2;
+      if (isMultiClass) _multiClassCount++;
+      
+      return true;
+    }).toList();
   }
 
   void _onScroll() {
@@ -62,19 +78,35 @@ class _AppleGridViewState extends State<AppleGridView> {
     super.dispose();
   }
 
+  /// Compara por CONTEÚDO (ids em sequência), não por identidade de lista:
+  /// filteredApplesProvider devolve uma List nova a cada poll de 5s, por isso
+  /// `oldWidget.apples != widget.apples` era sempre true e a grelha resetava
+  /// a paginação/scroll a cada 5 segundos, mesmo sem nenhuma maçã nova.
+  bool _sameApples(List<Apple> a, List<Apple> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id) return false;
+    }
+    return true;
+  }
+
   @override
   void didUpdateWidget(AppleGridView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Se a lista de maçãs enviada pelo pai mudar, recalcula os válidos e reseta o contador
-    if (oldWidget.apples.length != widget.apples.length ||
-        oldWidget.apples != widget.apples) {
+    if (!_sameApples(oldWidget.apples, widget.apples)) {
       _updateValidApples();
       _visibleCount = 24;
+    } else if (!identical(oldWidget.apples, widget.apples)) {
+      // Mesmo conjunto de maçãs mas objetos possivelmente atualizados
+      // (ex.: correção manual aplicada), refresca os dados exibidos
+      // sem resetar a paginação/posição de scroll.
+      _updateValidApples();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final onlyMultiClass = ref.watch(multiClassFilterProvider);
     final displayItems = _validApples.take(_visibleCount).toList();
 
     return Column(
@@ -109,6 +141,33 @@ class _AppleGridViewState extends State<AppleGridView> {
                 child: Text(
                   '${(_gridExtent / 220 * 100).toInt()}%',
                   style: TextStyle(color: AppColors.primary, fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(width: 24),
+              Container(width: 1, height: 24, color: AppColors.isDark ? Colors.white24 : Colors.black26),
+              const SizedBox(width: 24),
+              InkWell(
+                onTap: () {
+                  ref.read(multiClassFilterProvider.notifier).toggle();
+                  _scrollController.jumpTo(0);
+                },
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: Checkbox(
+                        value: onlyMultiClass,
+                        onChanged: (val) {
+                          ref.read(multiClassFilterProvider.notifier).toggle();
+                          _scrollController.jumpTo(0);
+                        },
+                        activeColor: AppColors.primary,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text('Apenas Multi-classe ($_multiClassCount)', style: TextStyle(color: AppColors.textPrimary, fontSize: 13, fontWeight: FontWeight.bold)),
+                  ],
                 ),
               ),
             ],

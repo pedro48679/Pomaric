@@ -9,7 +9,7 @@ Widget urgencyFormulaCard(Batch batch) {
     decoration: BoxDecoration(
       color: AppColors.surface,
       borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: (AppColors.isDark ? Colors.white : Colors.black).withOpacity(0.08)),
+      border: Border.all(color: (AppColors.isDark ? Colors.white : Colors.black).withValues(alpha: 0.08)),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -44,16 +44,17 @@ Widget urgencyFormulaCard(Batch batch) {
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.3),
+                color: Colors.black.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.cyanAccent.withOpacity(0.15)),
+                border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.15)),
               ),
               child: Center(
                 child: Text(
-                  'Urgência = (Contaminação × 40%) + (Severidade × 60%)',
+                  'Urgência = (Contaminação × 40%) + (Severidade × 60%) - (Saudáveis × 20%)',
+                  textAlign: TextAlign.center,
                   style: GoogleFonts.firaCode(
                     color: Colors.cyanAccent,
-                    fontSize: 11,
+                    fontSize: 10.5,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -87,9 +88,9 @@ Widget urgencyFormulaCard(Batch batch) {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Risco de contágio biológico rápido:\n'
-                    '• Scab: 90%  ·  Blotch: 80\%\n'
-                    '• Anthracnose: 50%  ·  Rot: 25%',
+                    'Risco pós-colheita em câmara:\n'
+                    '• Rot: 90%  ·  Anthracnose: 75%\n'
+                    '• Scab: 35%  ·  Blotch: 20%',
                     style: TextStyle(color: AppColors.textSecondary, fontSize: 10, height: 1.5),
                   ),
                 ],
@@ -116,8 +117,8 @@ Widget urgencyFormulaCard(Batch batch) {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Danos comerciais irreversíveis:\n'
-                    '• Anthracnose/Rot: 100% (Descarte)\n'
+                    'Danos comerciais ao fruto:\n'
+                    '• Rot/Anthracnose: 100% (Descarte)\n'
                     '• Scab/Blotch: 40% (Sumo/Polpa)',
                     style: TextStyle(color: AppColors.textSecondary, fontSize: 10, height: 1.5),
                   ),
@@ -125,6 +126,20 @@ Widget urgencyFormulaCard(Batch batch) {
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 10),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: AppColors.healthy.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: AppColors.healthy.withValues(alpha: 0.2)),
+          ),
+          child: Text(
+            '💡 Atenuação por Fruta Sã: Cada % de maçãs saudáveis reduz a urgência global do lote até 20% (diluição biológica).',
+            style: TextStyle(color: AppColors.healthy, fontSize: 9.5, fontWeight: FontWeight.w500),
+          ),
         ),
       ],
     ),

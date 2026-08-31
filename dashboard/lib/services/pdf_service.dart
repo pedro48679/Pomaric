@@ -8,7 +8,7 @@ import 'package:printing/printing.dart';
 // Estrutura plana (sem dependências de providers/Flutter) construída na UI
 // (reports_dashboard.dart) e consumida tanto pela pré-visualização em ecrã
 // como pela geração do PDF, garantindo que ambos mostram exatamente os
-// mesmos números. Documento formal, orientado a tabelas — sem gráficos.
+// mesmos números. Documento formal, orientado a tabelas (sem gráficos).
 // ═══════════════════════════════════════════════════════════════════════════
 
 class ReportData {
@@ -36,6 +36,8 @@ class ReportData {
   // Detalhe
   final List<BatchRiskRow> batchRisks;
   final CnnSummary cnn;
+  final CnnDecisionDetail? cnnDetail;
+  final EconomicSummary? economic;
   final IotSummary? iot;
   final BatchFocus? focus;
 
@@ -63,6 +65,8 @@ class ReportData {
     required this.distribution,
     required this.batchRisks,
     required this.cnn,
+    required this.cnnDetail,
+    required this.economic,
     required this.iot,
     required this.focus,
     required this.statusLabel,
@@ -101,6 +105,8 @@ class CnnSummary {
   final double cnn2AvgConf;
   final double cnn5AvgConf;
   final int uncertainCount;
+  final int cnn2HealthyCount;
+  final int cnn5HealthyCount;
   CnnSummary({
     required this.cnn2Count,
     required this.cnn5Count,
@@ -108,10 +114,94 @@ class CnnSummary {
     required this.cnn2AvgConf,
     required this.cnn5AvgConf,
     required this.uncertainCount,
+    this.cnn2HealthyCount = 0,
+    this.cnn5HealthyCount = 0,
   });
 
   int get total => cnn2Count + cnn5Count + otherCount;
   bool get hasData => total > 0;
+}
+
+/// Bandas de decisão do CNN5 + divisão gatekeeper CNN2/CNN5. Alimentado
+/// pelo biChartsProvider (BiAdapters.uncertaintyZone + gatekeeperEfficiency),
+/// os mesmos dados dos gráficos do Cap.3 da dashboard.
+class CnnDecisionDetail {
+  final int bandAccept; // confiança >= limiar de aceitação
+  final int bandTriage; // 30% ao limiar: triagem manual
+  final int bandAutoOthers; // <30%: auto-"Outros"
+  final int routedTotal;
+  final double acceptThresholdPct; // ex.: 80
+  final int cnn2Healthy; // CNN2 aprovou saudável (nunca escalou)
+  final int cnn5Healthy; // escalado por precaução, CNN5 confirmou saudável
+  final int cnn5Disease; // CNN5 diagnosticou doença
+  final double avgDiseaseConfPct;
+  CnnDecisionDetail({
+    required this.bandAccept,
+    required this.bandTriage,
+    required this.bandAutoOthers,
+    required this.routedTotal,
+    required this.acceptThresholdPct,
+    required this.cnn2Healthy,
+    required this.cnn5Healthy,
+    required this.cnn5Disease,
+    required this.avgDiseaseConfPct,
+  });
+
+  int get gatekeeperTotal => cnn2Healthy + cnn5Healthy + cnn5Disease;
+  bool get hasData => routedTotal > 0 || gatekeeperTotal > 0;
+}
+
+/// Secção económica: 4 classes comerciais unificadas (Classe I / Classe II /
+/// Indústria / Descarte) que somam sempre 100% do pomar. Preços por unidade
+/// são estimativas para fins analíticos e de simulação (ver disclaimer na
+/// secção), não valores de mercado reais.
+class EconomicClassRow {
+  final String label;
+  final int count;
+  final double pct; // 0-100, sobre o total do pomar
+  final double precoUn; // €/unidade (0 para Descarte)
+  final double valor; // €
+  EconomicClassRow({
+    required this.label,
+    required this.count,
+    required this.pct,
+    required this.precoUn,
+    required this.valor,
+  });
+}
+
+class BatchCommercialRow {
+  final String location;
+  final int total;
+  final double pctI;
+  final double pctII;
+  final double pctInd;
+  final double pctDesc;
+  BatchCommercialRow({
+    required this.location,
+    required this.total,
+    required this.pctI,
+    required this.pctII,
+    required this.pctInd,
+    required this.pctDesc,
+  });
+}
+
+class EconomicSummary {
+  final double valorTotal;
+  final double capacityValue; // se 100% do pomar fosse Classe I
+  final double metaValue; // 80% da capacidade
+  final List<EconomicClassRow> classes; // I, II, Indústria, Descarte
+  final List<BatchCommercialRow> perBatch;
+  EconomicSummary({
+    required this.valorTotal,
+    required this.capacityValue,
+    required this.metaValue,
+    required this.classes,
+    required this.perBatch,
+  });
+
+  bool get hasData => classes.any((c) => c.count > 0);
 }
 
 class IotSummary {
@@ -176,7 +266,7 @@ class ActionItem {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GERAÇÃO DO PDF — documento formal, orientado a tabelas, sem gráficos.
+// GERAÇÃO DO PDF: documento formal, orientado a tabelas, sem gráficos.
 // ═══════════════════════════════════════════════════════════════════════════
 
 class PdfService {
@@ -189,6 +279,10 @@ class PdfService {
   static const PdfColor _red = PdfColor.fromInt(0xFFB91C1C);
   static const PdfColor _violet = PdfColor.fromInt(0xFF6D28D9);
   static const PdfColor _pink = PdfColor.fromInt(0xFFBE185D);
+  static const PdfColor _gold = PdfColor.fromInt(0xFFCA8A04);
+
+  // Cores das 4 classes comerciais (secção económica), na ordem I/II/Ind/Desc.
+  static const List<PdfColor> _classColors = [_emerald, _gold, _amber, _red];
 
   static PdfColor _conditionColor(String c) {
     switch (c.toLowerCase()) {
@@ -238,28 +332,37 @@ class PdfService {
         header: (ctx) => ctx.pageNumber == 1 ? pw.SizedBox() : _runningHeader(d),
         footer: (ctx) => _footer(ctx, d),
         build: (context) {
+          int sectionCounter = 1;
           final sections = <pw.Widget>[
             _titleBlock(d),
             pw.SizedBox(height: 4),
             _identificationTable(d),
             pw.SizedBox(height: 18),
-            _section('1. Resumo Quantitativo'),
+            _section('${sectionCounter++}. Resumo Quantitativo'),
             _summaryTable(d),
             pw.SizedBox(height: 16),
-            _section('2. Distribuição por Patologia'),
+            _section('${sectionCounter++}. Distribuição por Patologia'),
             _distributionTable(d),
             pw.SizedBox(height: 16),
-            _section('3. Detalhe por Lote'),
+            _section('${sectionCounter++}. Detalhe por Lote'),
             _batchTable(d),
             pw.SizedBox(height: 16),
-            _section('4. Desempenho dos Modelos de Classificação'),
+            _section('${sectionCounter++}. Desempenho da Visão Computacional'),
             _cnnTable(d),
           ];
+
+          if (d.economic != null && d.economic!.hasData) {
+            sections.addAll([
+              pw.SizedBox(height: 16),
+              _section('${sectionCounter++}. Valor Económico da Colheita'),
+              _economicSection(d.economic!),
+            ]);
+          }
 
           if (d.focus != null) {
             sections.addAll([
               pw.SizedBox(height: 16),
-              _section('5. Lote em Foco: ${d.focus!.id}'),
+              _section('${sectionCounter++}. Lote em Foco: ${d.focus!.id}'),
               _focusTables(d.focus!),
             ]);
           }
@@ -267,14 +370,14 @@ class PdfService {
           if (d.iot != null) {
             sections.addAll([
               pw.SizedBox(height: 16),
-              _section('6. Equipamento de Captura'),
+              _section('${sectionCounter++}. Equipamento de Captura'),
               _iotTable(d.iot!),
             ]);
           }
 
           sections.addAll([
             pw.SizedBox(height: 16),
-            _section('7. Observações e Ações Recomendadas'),
+            _section('${sectionCounter++}. Observações e Ações Recomendadas'),
             _recommendationsTable(d),
           ]);
 
@@ -422,11 +525,11 @@ class PdfService {
       ['Aprovação Global', '${d.globalApproval.toStringAsFixed(1)}%'],
       ['Confiança Média da IA', '${d.avgConf.toStringAsFixed(1)}%'],
       ['Taxa de Automação', '${d.automationRate.toStringAsFixed(1)}%'],
-      ['Anomalias Detetadas', '${d.totalAnomalies}'],
+      ['Frutos Afetados', '${d.totalAnomalies}'],
       ['Fila de Revisão Manual', '${d.humanQueue}'],
-      ['Doença Predominante', d.dominantAnomaly == 'Nenhuma' ? '— (sem casos)' : '${_displayName(d.dominantAnomaly)} (${d.dominantAnomalyCount} casos)'],
+      ['Doença Predominante', d.dominantAnomaly == 'Nenhuma' ? 'Nenhuma (sem casos)' : '${_displayName(d.dominantAnomaly)} (${d.dominantAnomalyCount} casos)'],
       ['Variação de Aprovação (vs. início do período)', '${d.deltaPp >= 0 ? "+" : ""}${d.deltaPp.toStringAsFixed(1)} pp'],
-      ['Índice de Saúde Global', '${d.healthScore.toStringAsFixed(0)}% — ${d.statusLabel}'],
+      ['Índice de Saúde Global', '${d.healthScore.toStringAsFixed(0)}% (${d.statusLabel})'],
     ];
     return pw.Table(
       border: _tableBorder(),
@@ -497,7 +600,7 @@ class PdfService {
             pw.TableRow(children: [
               _cell(b.id, bold: true),
               _cell(b.location),
-              _cell(b.dominant == 'Nenhuma' ? '—' : _displayName(b.dominant), color: _conditionColor(b.dominant)),
+              _cell(b.dominant == 'Nenhuma' ? 'n/d' : _displayName(b.dominant), color: _conditionColor(b.dominant)),
               _cell('${b.total}', align: pw.Alignment.centerRight),
               _cell('${b.approval.toStringAsFixed(0)}%', align: pw.Alignment.centerRight),
               _cell('${(b.contamination * 100).toStringAsFixed(0)}%', align: pw.Alignment.centerRight),
@@ -517,27 +620,235 @@ class PdfService {
     final c = d.cnn;
     if (!c.hasData) return _muted('Sem classificações registadas pelo pipeline de IA no período.');
     final total = c.total > 0 ? c.total : 1;
+    final totalHealthy = c.cnn2HealthyCount + c.cnn5HealthyCount;
+    final th = totalHealthy > 0 ? totalHealthy : 1;
     final rows = <List<String>>[
-      ['CNN2 (Gatekeeper — deteção de saudável)', '${c.cnn2Count}', '${(c.cnn2Count / total * 100).toStringAsFixed(0)}%', '${c.cnn2AvgConf.toStringAsFixed(1)}%'],
-      ['CNN5 (Multiclasse — classificação de patologia)', '${c.cnn5Count}', '${(c.cnn5Count / total * 100).toStringAsFixed(0)}%', '${c.cnn5AvgConf.toStringAsFixed(1)}%'],
+      [
+        'Triagem Primária (Gatekeeper binário)', 
+        '${c.cnn2Count}', 
+        '${(c.cnn2Count / total * 100).toStringAsFixed(0)}%', 
+        '${(c.cnn2HealthyCount / th * 100).toStringAsFixed(0)}%', 
+        '${c.cnn2AvgConf.toStringAsFixed(1)}%'
+      ],
+      [
+        'Diagnóstico (Analisador multiclasse)', 
+        '${c.cnn5Count}', 
+        '${(c.cnn5Count / total * 100).toStringAsFixed(0)}%', 
+        '${(c.cnn5HealthyCount / th * 100).toStringAsFixed(0)}%', 
+        '${c.cnn5AvgConf.toStringAsFixed(1)}%'
+      ],
     ];
+    final det = d.cnnDetail;
     return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
       pw.Table(
         border: _tableBorder(),
-        columnWidths: const {0: pw.FlexColumnWidth(2.4), 1: pw.FlexColumnWidth(0.8), 2: pw.FlexColumnWidth(0.8), 3: pw.FlexColumnWidth(1)},
+        columnWidths: const {0: pw.FlexColumnWidth(2.4), 1: pw.FlexColumnWidth(0.8), 2: pw.FlexColumnWidth(0.8), 3: pw.FlexColumnWidth(0.8), 4: pw.FlexColumnWidth(1)},
         children: [
-          _headerRow(['Modelo', 'Nº Classif.', '% do Fluxo', 'Confiança Média'], aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.centerRight, pw.Alignment.centerRight]),
+          _headerRow(['Modelo', 'Nº Classif.', '% do Fluxo', '% Saudáveis', 'Confiança Média'], aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.centerRight, pw.Alignment.centerRight, pw.Alignment.centerRight]),
           for (final r in rows)
             pw.TableRow(children: [
               _cell(r[0]),
               _cell(r[1], align: pw.Alignment.centerRight),
               _cell(r[2], align: pw.Alignment.centerRight),
-              _cell(r[3], bold: true, align: pw.Alignment.centerRight),
+              _cell(r[3], align: pw.Alignment.centerRight),
+              _cell(r[4], bold: true, align: pw.Alignment.centerRight),
             ]),
         ],
       ),
       pw.SizedBox(height: 6),
-      _muted('Fila de revisão humana (confiança < 80% ou amostragem de auditoria): ${c.uncertainCount} maçãs.'),
+      _muted('Fila de revisão humana (registos pendentes de triagem, pomar completo): ${c.uncertainCount} maçãs.'),
+      if (det != null && det.routedTotal > 0) ...[
+        pw.SizedBox(height: 12),
+        pw.Text('Bandas de Decisão do CNN5 (regra operacional)',
+            style: pw.TextStyle(color: _ink, fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.Table(
+          border: _tableBorder(),
+          columnWidths: const {0: pw.FlexColumnWidth(2.4), 1: pw.FlexColumnWidth(0.8), 2: pw.FlexColumnWidth(0.8)},
+          children: [
+            _headerRow(['Banda de confiança', 'Nº Maçãs', '%'], aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.centerRight]),
+            pw.TableRow(children: [
+              _cell('Aceite automático (>= ${det.acceptThresholdPct.toStringAsFixed(0)}%)', color: _emerald, bold: true),
+              _cell('${det.bandAccept}', align: pw.Alignment.centerRight),
+              _cell('${(det.bandAccept / det.routedTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+            pw.TableRow(children: [
+              _cell('Triagem manual (30% a ${det.acceptThresholdPct.toStringAsFixed(0)}%)', color: _amber, bold: true),
+              _cell('${det.bandTriage}', align: pw.Alignment.centerRight),
+              _cell('${(det.bandTriage / det.routedTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+            pw.TableRow(children: [
+              _cell('Auto-"Outros" (< 30%)', color: _red, bold: true),
+              _cell('${det.bandAutoOthers}', align: pw.Alignment.centerRight),
+              _cell('${(det.bandAutoOthers / det.routedTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+          ],
+        ),
+      ],
+      if (det != null && det.gatekeeperTotal > 0) ...[
+        pw.SizedBox(height: 12),
+        pw.Text('Divisão de Decisão CNN2/CNN5 (arquitetura gatekeeper)',
+            style: pw.TextStyle(color: _ink, fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.Table(
+          border: _tableBorder(),
+          columnWidths: const {0: pw.FlexColumnWidth(2.4), 1: pw.FlexColumnWidth(0.8), 2: pw.FlexColumnWidth(0.8)},
+          children: [
+            _headerRow(['Resultado', 'Nº Maçãs', '%'], aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.centerRight]),
+            pw.TableRow(children: [
+              _cell('CNN2 aprovou como saudável (sem escalar)', color: _emerald, bold: true),
+              _cell('${det.cnn2Healthy}', align: pw.Alignment.centerRight),
+              _cell('${(det.cnn2Healthy / det.gatekeeperTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+            pw.TableRow(children: [
+              _cell('Escalado por precaução, CNN5 confirmou saudável', color: _gold, bold: true),
+              _cell('${det.cnn5Healthy}', align: pw.Alignment.centerRight),
+              _cell('${(det.cnn5Healthy / det.gatekeeperTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+            pw.TableRow(children: [
+              _cell('CNN5 diagnosticou doença', color: _red, bold: true),
+              _cell('${det.cnn5Disease}', align: pw.Alignment.centerRight),
+              _cell('${(det.cnn5Disease / det.gatekeeperTotal * 100).toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+            ]),
+          ],
+        ),
+        pw.SizedBox(height: 4),
+        _muted('Confiança média dos diagnósticos de doença do CNN5: ${det.avgDiseaseConfPct.toStringAsFixed(1)}%. '
+            'O CNN2 nunca emite veredito de doença: sempre que suspeita, escala ao CNN5.'),
+      ],
+    ]);
+  }
+
+  // ─── 5. VALOR ECONÓMICO ───
+  /// Barra 100% empilhada com as 4 classes comerciais (flex proporcional às
+  /// contagens). Única "primitiva gráfica" do documento; tudo o resto é tabela.
+  static pw.Widget _stackedClassBar(List<int> counts, {double height = 9}) {
+    final total = counts.fold<int>(0, (s, c) => s + c);
+    if (total == 0) return pw.SizedBox(height: height);
+    return pw.Row(children: [
+      for (int i = 0; i < counts.length; i++)
+        if (counts[i] > 0)
+          pw.Expanded(
+            flex: counts[i],
+            child: pw.Container(height: height, color: _classColors[i]),
+          ),
+    ]);
+  }
+
+  static String _eur(double v) => '${v.toStringAsFixed(2)} EUR';
+
+  static pw.Widget _economicSection(EconomicSummary e) {
+    final metaHit = e.valorTotal >= e.metaValue;
+    final counts = e.classes.map((c) => c.count).toList();
+    return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+      // KPIs
+      pw.Table(
+        border: null,
+        columnWidths: const {0: pw.FlexColumnWidth(1), 1: pw.FlexColumnWidth(1), 2: pw.FlexColumnWidth(1)},
+        children: [
+          pw.TableRow(children: [
+            _idCell('VALOR ESTIMADO TOTAL', _eur(e.valorTotal)),
+            _idCell('CAPACIDADE (100% CLASSE I)', _eur(e.capacityValue)),
+            _idCell('META DE QUALIDADE (80%)',
+                '${_eur(e.metaValue)} (${metaHit ? 'atingida' : 'abaixo'})'),
+          ]),
+        ],
+      ),
+      pw.SizedBox(height: 8),
+      // Disclaimer obrigatório: estimativas, não preços de mercado.
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: pw.BoxDecoration(
+          color: _headBg,
+          border: pw.Border.all(color: _amber, width: 0.75),
+          borderRadius: pw.BorderRadius.circular(3),
+        ),
+        child: pw.Text(
+          'Nota: os valores por classe (0,60 EUR / 0,40 EUR / 0,20 EUR por unidade) são estimativas de referência '
+          'para fins analíticos e de simulação, não preços de mercado reais. A classe Descarte agrega frutos sem '
+          'valor comercial (Rot, Anthracnose e outros).',
+          style: pw.TextStyle(color: _amber, fontSize: 8, fontWeight: pw.FontWeight.bold),
+        ),
+      ),
+      pw.SizedBox(height: 10),
+      // Tabela das 4 classes
+      pw.Table(
+        border: _tableBorder(),
+        columnWidths: const {
+          0: pw.FlexColumnWidth(2.2),
+          1: pw.FlexColumnWidth(0.9),
+          2: pw.FlexColumnWidth(0.8),
+          3: pw.FlexColumnWidth(0.9),
+          4: pw.FlexColumnWidth(1),
+        },
+        children: [
+          _headerRow(
+            ['Classe Comercial', 'Nº Maçãs', '% Pomar', 'Preço/un', 'Valor'],
+            aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.centerRight, pw.Alignment.centerRight, pw.Alignment.centerRight],
+          ),
+          for (int i = 0; i < e.classes.length; i++)
+            pw.TableRow(children: [
+              _cell(e.classes[i].label, color: _classColors[i], bold: true),
+              _cell('${e.classes[i].count}', align: pw.Alignment.centerRight),
+              _cell('${e.classes[i].pct.toStringAsFixed(1)}%', align: pw.Alignment.centerRight),
+              _cell(e.classes[i].precoUn > 0 ? _eur(e.classes[i].precoUn) : 'sem valor', align: pw.Alignment.centerRight),
+              _cell(_eur(e.classes[i].valor), bold: true, align: pw.Alignment.centerRight),
+            ]),
+          pw.TableRow(
+            decoration: const pw.BoxDecoration(color: _headBg),
+            children: [
+              _cell('TOTAL', bold: true),
+              _cell('${counts.fold<int>(0, (s, c) => s + c)}', bold: true, align: pw.Alignment.centerRight),
+              _cell('100.0%', bold: true, align: pw.Alignment.centerRight),
+              _cell('', align: pw.Alignment.centerRight),
+              _cell(_eur(e.valorTotal), bold: true, align: pw.Alignment.centerRight),
+            ],
+          ),
+        ],
+      ),
+      pw.SizedBox(height: 8),
+      _stackedClassBar(counts),
+      pw.SizedBox(height: 4),
+      _muted('Composição comercial do pomar: Classe I (verde), Classe II (dourado), Indústria (laranja), Descarte (vermelho).'),
+      if (e.perBatch.isNotEmpty) ...[
+        pw.SizedBox(height: 12),
+        pw.Text('Triagem de Qualidade Comercial por Lote',
+            style: pw.TextStyle(color: _ink, fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.Table(
+          border: _tableBorder(),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(1.4),
+            1: pw.FlexColumnWidth(0.8),
+            2: pw.FlexColumnWidth(2.4),
+            3: pw.FlexColumnWidth(0.9),
+            4: pw.FlexColumnWidth(0.9),
+          },
+          children: [
+            _headerRow(
+              ['Lote', 'Maçãs', 'Composição', '% Classe I', '% Descarte'],
+              aligns: [pw.Alignment.centerLeft, pw.Alignment.centerRight, pw.Alignment.center, pw.Alignment.centerRight, pw.Alignment.centerRight],
+            ),
+            for (final b in e.perBatch)
+              pw.TableRow(children: [
+                _cell(b.location, bold: true),
+                _cell('${b.total}', align: pw.Alignment.centerRight),
+                pw.Padding(
+                  padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                  child: _stackedClassBar([
+                    (b.pctI * 10).round(),
+                    (b.pctII * 10).round(),
+                    (b.pctInd * 10).round(),
+                    (b.pctDesc * 10).round(),
+                  ], height: 7),
+                ),
+                _cell('${b.pctI.toStringAsFixed(0)}%', color: _emerald, bold: true, align: pw.Alignment.centerRight),
+                _cell('${b.pctDesc.toStringAsFixed(0)}%', color: b.pctDesc >= 20 ? _red : _ink, align: pw.Alignment.centerRight),
+              ]),
+          ],
+        ),
+      ],
     ]);
   }
 
@@ -575,9 +886,9 @@ class PdfService {
           ],
         ),
       if (f.worst.isNotEmpty) ...[
-        pw.SizedBox(height: 10),
-        pw.Text('Amostras de maior risco', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: _ink)),
-        pw.SizedBox(height: 4),
+        pw.SizedBox(height: 12),
+        pw.Text('Amostras representativas do Lote', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: _ink)),
+        pw.SizedBox(height: 5),
         pw.Table(
           border: _tableBorder(),
           columnWidths: const {0: pw.FlexColumnWidth(1.4), 1: pw.FlexColumnWidth(1), 2: pw.FlexColumnWidth(1)},
@@ -600,9 +911,9 @@ class PdfService {
     final statusColor = iot.online ? _emerald : _red;
     final rows = <List<String>>[
       ['Estado', iot.online ? iot.mode.toUpperCase() : 'OFFLINE'],
-      ['Temperatura CPU', iot.cpuTemp != null ? '${iot.cpuTemp!.toStringAsFixed(0)}°C' : '—'],
-      ['Câmara', iot.cameraFps != null ? '${iot.cameraFps!.toStringAsFixed(1)} fps' : '—'],
-      ['Nitidez (Laplacian)', iot.lastBlur != null ? iot.lastBlur!.toStringAsFixed(0) : '—'],
+      ['Temperatura CPU', iot.cpuTemp != null ? '${iot.cpuTemp!.toStringAsFixed(0)}°C' : 'n/d'],
+      ['Câmara', iot.cameraFps != null ? '${iot.cameraFps!.toStringAsFixed(1)} fps' : 'n/d'],
+      ['Nitidez (Laplacian)', iot.lastBlur != null ? iot.lastBlur!.toStringAsFixed(0) : 'n/d'],
       ['Total de Inferências', '${iot.inferenceCount}'],
       ['Uptime', iot.uptime],
     ];
@@ -620,7 +931,7 @@ class PdfService {
       ),
       if (iot.blurWarning) ...[
         pw.SizedBox(height: 6),
-        pw.Text('Aviso: nitidez baixa — lente possivelmente suja ou descalibrada.',
+        pw.Text('Aviso: nitidez baixa, lente possivelmente suja ou descalibrada.',
             style: pw.TextStyle(color: _amber, fontSize: 9, fontWeight: pw.FontWeight.bold)),
       ],
     ]);

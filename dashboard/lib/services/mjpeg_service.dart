@@ -41,6 +41,12 @@ class MjpegService {
       try {
         final request = http.Request('GET', Uri.parse(url));
         final response = await _client!.send(request);
+        // Sem isto, um 404/403/redirect (corpo que termina de imediato, sem
+        // exceção) completava o await-for e o while reconectava em loop
+        // apertado sem nenhum delay, retry storm contra o Pi.
+        if (response.statusCode != 200) {
+          throw http.ClientException('MJPEG HTTP ${response.statusCode}', Uri.parse(url));
+        }
 
         await for (final chunk in response.stream) {
           if (!_running) return;
@@ -52,8 +58,11 @@ class MjpegService {
           }
         }
       } catch (_) {
-        if (_running) await Future.delayed(const Duration(seconds: 2));
+        // backoff no caminho de exceção; o delay incondicional está abaixo
       }
+      // Backoff SEMPRE entre tentativas de reconexão, também cobre o caso
+      // de um stream 200 que termina logo (servidor a rejeitar sem erro).
+      if (_running) await Future.delayed(const Duration(seconds: 2));
     }
   }
 
@@ -78,7 +87,7 @@ class MjpegService {
           break;
         }
       }
-      if (eoiIdx < 0) break; // frame incompleto — aguardar mais dados
+      if (eoiIdx < 0) break; // frame incompleto, aguardar mais dados
 
       final ctrl = _controller;
       if (ctrl != null && !ctrl.isClosed) {

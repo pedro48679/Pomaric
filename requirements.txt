@@ -1,16 +1,36 @@
-# PC-side pipeline: training (CNN2.py/CNN5.py), inference_server.py, ws_server.py,
-# cnn5_watcher.py, mlops_server.py, shadow_runner.py, RGBA_format.py, Grad-CAM tooling.
-#
-# Raspberry Pi (edge) has a lighter, separate set of dependencies — see
-# ONXX/requirements_export.txt and ONXX/raspberry.md.
+# Pomaric / Apple Classification & Pipeline Dependencies
+# ---------------------------------------------------
+# Core AI & Deep Learning Frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
 
-torch
-torchvision
-numpy
-opencv-python
-pillow
-matplotlib
-onnxruntime
-rembg
-websockets
-supabase
+# ONNX Export & Runtime
+onnx>=1.14.0
+onnxruntime>=1.15.0
+onnx-simplifier>=0.4.0
+
+# Image Processing & Computer Vision
+opencv-python>=4.8.0
+pillow>=10.0.0
+numpy>=1.24.0
+rembg>=2.0.50
+
+# Data Analysis & Metrics
+pandas>=2.0.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# Cloud & Database Services
+supabase>=2.0.0
+
+# Edge / MLOps Communication
+websockets>=11.0
+watchdog>=3.0.0
+psutil>=5.9.0
+
+# Scraping & Data Collection (Optional)
+playwright>=1.35.0
+requests>=2.31.0
+imagededup>=0.3.0

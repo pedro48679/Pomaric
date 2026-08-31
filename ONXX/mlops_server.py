@@ -26,17 +26,20 @@ import sys
 import threading
 import time
 import argparse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+# ThreadingHTTPServer: o HTTPServer base serve 1 pedido de cada vez — um
+# /classes lento (Supabase) bloqueava a fila inteira e o polling de 2s do
+# dashboard acumulava timeouts (badge "online" a piscar durante demos).
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-SUPABASE_URL = "https://ypbqdeivphxerxgahxrd.supabase.co"
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
-if not SUPABASE_KEY:
+if not SUPABASE_URL or not SUPABASE_KEY:
     sys.exit(
-        "ERRO: define a variavel de ambiente SUPABASE_ANON_KEY antes de "
-        "correr este script (mesma anon key usada pela dashboard Flutter)."
+        "ERRO: define as variaveis de ambiente SUPABASE_URL e SUPABASE_ANON_KEY antes de "
+        "correr este script (as mesmas usadas pela dashboard Flutter)."
     )
 
 # Pasta central de modelos — mesma usada pelo train_cnn.py
@@ -99,7 +102,12 @@ def _load_shadow_state() -> dict:
 
 
 def _save_shadow_state(state: dict):
-    _SHADOW_STATE_PATH.write_text(json.dumps(state, indent=2))
+    # Escrita atómica (temp + os.replace): /shadow/status pode ler o ficheiro
+    # a meio de um write_text direto e apanhar JSON truncado — o parse falhava
+    # e o estado regredia transitoriamente para 'idle' (badge a piscar).
+    tmp_path = _SHADOW_STATE_PATH.with_suffix('.json.tmp')
+    tmp_path.write_text(json.dumps(state, indent=2))
+    os.replace(tmp_path, _SHADOW_STATE_PATH)
 
 
 def _set_status(**kwargs):
@@ -178,6 +186,8 @@ class MLOpsHandler(BaseHTTPRequestHandler):
             self._handle_shadow_set()
         elif path == '/shadow/start':
             self._handle_shadow_start()
+        elif path == '/shadow/simulate':
+            self._handle_shadow_simulate()
         elif path == '/shadow/stop':
             self._handle_shadow_stop()
         elif path == '/shadow/promote':
@@ -195,20 +205,57 @@ class MLOpsHandler(BaseHTTPRequestHandler):
             from supabase import create_client
             sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-            rows = sb.table('producao_atual').select('final_class').execute().data
+            def fetch_all_paginated(table_name, select_cols, lt_filter=None, eq_filter=None):
+                results = []
+                limit = 1000
+                offset = 0
+                while True:
+                    q = sb.table(table_name).select(select_cols)
+                    if lt_filter:
+                        q = q.lt(lt_filter[0], lt_filter[1])
+                    if eq_filter:
+                        q = q.eq(eq_filter[0], eq_filter[1])
+                    data = q.range(offset, offset + limit - 1).execute().data
+                    if not data:
+                        break
+                    results.extend(data)
+                    if len(data) < limit:
+                        break
+                    offset += limit
+                return results
+
+            rows = fetch_all_paginated('producao_atual', 'final_class')
             counts: dict[str, int] = {}
             for r in rows:
                 cls = r.get('final_class') or 'unknown'
                 counts[cls] = counts.get(cls, 0) + 1
 
-            hard_rows = sb.table('frames').select('label').lt('confidence', 0.75).execute().data
+            # Hard cases: MESMO critério do treino (confidence < 0.75 E
+            # is_worst_case) — antes o filtro divergia e o número mostrado
+            # no dashboard não correspondia ao que o treino via. Estes são
+            # rótulos automáticos não triados: reservados para avaliação,
+            # NUNCA para treino.
+            hard_rows = fetch_all_paginated('frames', 'label',
+                                            lt_filter=('confidence', 0.75),
+                                            eq_filter=('is_worst_case', True))
             hard: dict[str, int] = {}
             for r in hard_rows:
                 cls = r.get('label') or 'unknown'
                 hard[cls] = hard.get(cls, 0) + 1
 
+            # Ouro: imagens triadas manualmente (train_dataset) — entram no
+            # treino com peso reforçado. É este o número que o dashboard
+            # mostra a amarelo.
+            gold_rows = fetch_all_paginated('train_dataset', 'class')
+            gold: dict[str, int] = {}
+            for r in gold_rows:
+                cls = r.get('class') or 'unknown'
+                gold[cls] = gold.get(cls, 0) + 1
+
             classes = [
-                {'name': k, 'count': v, 'hard_cases': hard.get(k, 0)}
+                {'name': k, 'count': v,
+                 'gold': gold.get(k, 0),
+                 'hard_cases': hard.get(k, 0)}
                 for k, v in sorted(counts.items())
             ]
             self._ok(json.dumps({'classes': classes}).encode())
@@ -315,12 +362,13 @@ class MLOpsHandler(BaseHTTPRequestHandler):
             return
 
         script = Path(__file__).parent / 'shadow_runner.py'
+        log_file = open(Path(__file__).parent.parent / 'logs' / 'shadow_runner.log', 'a')
         _shadow_process = subprocess.Popen(
             [sys.executable, str(script),
              '--model', model,
              '--promote-after', str(promote_after),
              '--interval', str(interval)],
-            stdout=subprocess.PIPE,
+            stdout=log_file,
             stderr=subprocess.STDOUT,
         )
 
@@ -335,6 +383,47 @@ class MLOpsHandler(BaseHTTPRequestHandler):
         })
         _save_shadow_state(state)
         print(f'[Shadow] Iniciado PID={_shadow_process.pid}  modelo={model}')
+        self._ok(json.dumps({'status': 'started', 'pid': _shadow_process.pid}).encode())
+
+    def _handle_shadow_simulate(self):
+        """Lança shadow_runner.py como subprocess no modo de simulação histórica."""
+        global _shadow_process
+
+        if _shadow_process and _shadow_process.poll() is None:
+            self._ok(json.dumps({'status': 'already_running',
+                                  'pid': _shadow_process.pid}).encode())
+            return
+
+        length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(length))
+        model = body.get('model', '')
+        simulate_count = int(body.get('count', 1000))
+
+        if not model:
+            self._ok(json.dumps({'error': 'model é obrigatório'}).encode())
+            return
+
+        script = Path(__file__).parent / 'shadow_runner.py'
+        log_file = open(Path(__file__).parent.parent / 'logs' / 'shadow_runner.log', 'a')
+        _shadow_process = subprocess.Popen(
+            [sys.executable, str(script),
+             '--model', model,
+             '--simulate', str(simulate_count)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+
+        state = _load_shadow_state()
+        state.update({
+            'model': model,
+            'state': 'running',
+            'apples_processed': 0,
+            'accuracy': None,
+            'f1': None,
+            'pid': _shadow_process.pid,
+        })
+        _save_shadow_state(state)
+        print(f'[Shadow] Simulação Histórica PID={_shadow_process.pid} modelo={model} count={simulate_count}')
         self._ok(json.dumps({'status': 'started', 'pid': _shadow_process.pid}).encode())
 
     def _handle_shadow_stop(self):
@@ -447,7 +536,9 @@ class MLOpsHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 def _run_training(config: dict):
     try:
+        import importlib
         import train_cnn
+        importlib.reload(train_cnn)
         _set_status(
             state='downloading', progress=0,
             message='A iniciar treino...',
@@ -529,7 +620,7 @@ def main():
     print(f'  POST /train    POST /cancel    POST /shadow/set')
     print(f'  POST /models/publish    GET /models/publish/status')
 
-    server = HTTPServer(('0.0.0.0', args.port), MLOpsHandler)
+    server = ThreadingHTTPServer(('0.0.0.0', args.port), MLOpsHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

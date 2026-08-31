@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/supabase_service.dart';
+import 'dashboard_provider.dart';
 
 enum UserRole { admin, operator }
 
@@ -35,6 +36,17 @@ class AuthNotifier extends Notifier<AppUser?> {
 
   void logout() {
     state = null;
+    // Limpar o estado da sessão anterior: sem isto, o timer de polling de
+    // 5s do BatchNotifier continuava a correr no ecrã de login (invalidate
+    // dispara o onDispose do notifier, que cancela o timer), e o próximo
+    // utilizador herdava batches/histórico/pendentes de quem saiu.
+    ref.invalidate(batchProvider);
+    ref.invalidate(availableBatchesProvider);
+    ref.invalidate(loadDataFutureProvider);
+    ref.invalidate(correctionHistoryProvider);
+    ref.invalidate(dbPendingReviewProvider);
+    ref.invalidate(forcedTriageProvider);
+    ref.read(sessionActiveProvider.notifier).setActive(false);
   }
 }
 

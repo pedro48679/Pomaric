@@ -1,12 +1,45 @@
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bcrypt/bcrypt.dart';
+import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import '../models/models.dart';
 import 'local_cache_service.dart';
 
 class SupabaseService {
   static final _supabase = Supabase.instance.client;
   static bool isMockMode = false;
+
+  /// true só quando o mock foi ativado pelo FAILSAFE (BD inacessível) e não
+  /// pelo modo demo explícito (main_mock.dart), distingue "demonstração
+  /// escolhida" de "dados falsos porque a rede caiu", que exige banner de
+  /// aviso e tentativas de reconexão automática.
+  static bool isFailsafeMock = false;
+
+  /// true quando Supabase.initialize correu com sucesso. Sem isto, qualquer
+  /// acesso a _supabase lança, a reconexão automática só é tentada quando
+  /// o initialize chegou a acontecer.
+  static bool supabaseReady = false;
+
+  /// Sonda barata à BD real. Em sucesso, sai do modo failsafe, o chamador
+  /// (BatchNotifier) invalida loadDataFutureProvider para recarregar dados
+  /// reais. Nunca chamar no mock explícito (isFailsafeMock == false).
+  static Future<bool> tryReconnect() async {
+    if (!supabaseReady) return false;
+    try {
+      await _supabase
+          .from('apples')
+          .select('apple_id')
+          .limit(1)
+          .timeout(const Duration(seconds: 4));
+      isMockMode = false;
+      isFailsafeMock = false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Gera dados falsos para alimentar a Dashboard em modo Mock offline
   static List<Batch> generateMockBatches() {
@@ -115,7 +148,7 @@ class SupabaseService {
         int from = 0;
         int to = 999;
         bool hasMore = true;
-        const int maxTotal = 10000;
+        const int maxTotal = 20000;
 
         // 1. Fetch APENAS maçãs novas (Delta Sync)
         while (hasMore && newApplesData.length < maxTotal) {
@@ -265,9 +298,10 @@ class SupabaseService {
           print('A tentar novamente em 10 segundos... (Tentativa $attempts de $maxRetries)');
           await Future.delayed(const Duration(seconds: 10));
         } else {
-          // Failsafe: BD inacessível após todas as tentativas — usa dados de demonstração
-          print('[FAILSAFE] BD inacessível — a usar dados de demonstração.');
+          // Failsafe: BD inacessível após todas as tentativas, usa dados de demonstração
+          print('[FAILSAFE] BD inacessível, a usar dados de demonstração.');
           isMockMode = true;
+          isFailsafeMock = true;
           return generateMockBatches();
         }
       }
@@ -297,10 +331,20 @@ class SupabaseService {
     }
   }
 
-  /// Enviar maçã para a fila de revisão (Triagem)
+  /// Enviar maçã para a fila de revisão (Triagem). Idempotente, verifica se
+  /// já existe uma linha 'pending' para esta maçã antes de inserir, para que
+  /// cliques repetidos no botão de triagem não criem duplicados.
   static Future<void> flagForReview(Apple apple) async {
     if (isMockMode) return; // No-op em mock mode
     try {
+      final existing = await _supabase
+          .from('manual_review')
+          .select('id')
+          .eq('apple_id', apple.id)
+          .eq('status', 'pending')
+          .maybeSingle();
+      if (existing != null) return;
+
       await _supabase.from('manual_review').insert({
         'apple_id': apple.id,
         'updated_at': DateTime.now().toIso8601String(),
@@ -313,6 +357,29 @@ class SupabaseService {
     }
   }
 
+  /// Remove uma maçã da fila de revisão, só apaga se ainda estiver 'pending'
+  /// (nunca apaga um registo já 'completed', que é histórico de auditoria).
+  /// DELETE (não UPDATE de estado) de propósito: `completeReview()` acima
+  /// assume no máximo 1 linha de `manual_review` por `apple_id`
+  /// (`.maybeSingle()` sem filtro de status), deixar uma linha 'dismissed'
+  /// para trás quebraria essa invariante na próxima vez que a maçã fosse
+  /// reenviada e revista. Um DELETE é invisível a um delta-fetch por
+  /// `updated_at` (`getManualReviewsSince`); `dbPendingReviewProvider` cobre
+  /// isso com uma reconciliação periódica completa, não com este sync
+  /// incremental (ver `BatchNotifier._syncManualReviews`).
+  static Future<void> unflagForReview(String appleId) async {
+    if (isMockMode) return; // No-op em mock mode
+    try {
+      await _supabase
+          .from('manual_review')
+          .delete()
+          .eq('apple_id', appleId)
+          .eq('status', 'pending');
+    } catch (e) {
+      print('Erro ao remover da revisão: $e');
+    }
+  }
+
   /// Exportar para o dataset de treino (Active Learning)
   static Future<void> exportToTraining({
     required String appleId,
@@ -321,26 +388,91 @@ class SupabaseService {
   }) async {
     if (isMockMode) return; // No-op em mock mode
     try {
-      await _supabase.from('train_dataset').insert({
-        'apple_id': appleId,
-        'class': pathologyClass,
-      });
+      // Limpar entradas anteriores para esta maçã no treino
+      await _supabase.from('train_dataset').delete().eq('apple_id', appleId);
 
-      for (var circle in circles) {
-        if (circle.crop != null && circle.crop != 'none') {
-          await _supabase.from('train_dataset').insert({
-            'apple_id': '${appleId}_crop_${circle.circleIndex}',
-            'class': circle.disease,
-          });
-        }
-      }
+      // Inserir APENAS a imagem original na base de dados para não violar a Foreign Key da tabela `apples`.
+      // As duplicações de peso e os crops serão resolvidos dinamicamente pelo script train_cnn.py
+      await _supabase.from('train_dataset').insert({
+        'apple_id': appleId, 
+        'class': pathologyClass
+      });
     } catch (e) {
       print('Erro ao exportar para treino: $e');
     }
   }
 
-  /// Marcar triagem como concluída e registar quem o fez (Lógica Completa)
-  static Future<void> completeReview({
+  /// Descarrega a imagem original, recorta-a com base nos focos marcados e envia os crops e original para Storage
+  static Future<List<ManualAnnotation>> _processAndUploadCrops(
+    String appleId,
+    String? originalImageUrl,
+    List<ManualAnnotation> circles,
+  ) async {
+    if (originalImageUrl == null || originalImageUrl.isEmpty || circles.isEmpty) {
+      return circles;
+    }
+    try {
+      final response = await http.get(Uri.parse(originalImageUrl));
+      if (response.statusCode != 200) throw Exception('Falha HTTP ${response.statusCode}');
+
+      final Uint8List originalBytes = response.bodyBytes;
+      final decodedImage = img.decodeImage(originalBytes);
+      if (decodedImage == null) throw Exception('Não foi possível descodificar a imagem');
+
+      // 1. Fazer upload da imagem original para a pasta de treino
+      final originalPath = 'training/$appleId.jpg';
+      await _supabase.storage.from('Apple').uploadBinary(
+        originalPath,
+        originalBytes,
+        fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'),
+      );
+
+      // 2. Processar e fazer upload de cada crop
+      final updatedCircles = <ManualAnnotation>[];
+      for (var circle in circles) {
+        // Coordenadas x, y, radius vêm da UI (onde a tela é 450x450, ou seja, percentagens entre 0.0-1.0)
+        int cx = (circle.x * decodedImage.width).round();
+        int cy = (circle.y * decodedImage.height).round();
+        // O raio também usa a largura como base
+        int r = (circle.radius * decodedImage.width).round();
+
+        int startX = cx - r;
+        int startY = cy - r;
+        int cropW = r * 2;
+        int cropH = r * 2;
+
+        // Validar limites
+        if (startX < 0) startX = 0;
+        if (startY < 0) startY = 0;
+        if (startX + cropW > decodedImage.width) cropW = decodedImage.width - startX;
+        if (startY + cropH > decodedImage.height) cropH = decodedImage.height - startY;
+
+        final cropImg = img.copyCrop(decodedImage, x: startX, y: startY, width: cropW, height: cropH);
+        final cropBytes = Uint8List.fromList(img.encodeJpg(cropImg, quality: 90));
+
+        final safeDisease = circle.disease.toLowerCase().replaceAll(' damage', '').replaceAll(' ', '_');
+        final cropPath = 'training/${safeDisease}_${appleId}_crop_${circle.circleIndex}.jpg';
+        await _supabase.storage.from('Apple').uploadBinary(
+          cropPath,
+          cropBytes,
+          fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'),
+        );
+
+        final publicUrl = _supabase.storage.from('Apple').getPublicUrl(cropPath);
+        updatedCircles.add(circle.copyWith(crop: publicUrl));
+      }
+      return updatedCircles;
+    } catch (e) {
+      print('Erro ao processar crops: $e');
+      return circles;
+    }
+  }
+
+  /// Marcar triagem como concluída e registar quem o fez (Lógica Completa).
+  /// Devolve true em sucesso; false quando alguma escrita falhou, o chamador
+  /// deve mostrar o erro e NÃO atualizar o estado local como se tivesse sido
+  /// guardado (antes devolvia void e a UI reportava sucesso mesmo em falha).
+  static Future<bool> completeReview({
     required String appleId,
     required String decision,
     required String username,
@@ -350,8 +482,13 @@ class SupabaseService {
     required int originalConfidence,
     String? originalImageUrl,
   }) async {
-    if (isMockMode) return; // No-op em mock mode
+    if (isMockMode) return true; // No-op em mock mode
     try {
+      // 1. Upload dos crops NOVOS primeiro (antes de apagar os antigos):
+      // se este passo falhar, os crops antigos ainda existem, a janela em
+      // que uma falha a meio deixava a maçã sem crop nenhum desaparece.
+      final updatedCircles = await _processAndUploadCrops(appleId, originalImageUrl, circles);
+
       final now = DateTime.now().toIso8601String();
       await _supabase.from('manual_annotation').upsert({
         'apple_id': appleId,
@@ -360,32 +497,76 @@ class SupabaseService {
         'updated_at': now,
       }, onConflict: 'apple_id');
 
+      // 2. Limpeza de crops antigos (os novos têm nomes únicos por timestamp,
+      // não há colisão com os antigos, apagar depois é seguro)
+      final oldCircles = await _supabase.from('circles_manual').select().eq('apple_id', appleId);
+      final pathsToRemove = <String>[];
+      for (final oldC in oldCircles) {
+        final cropUrl = oldC['crop'] as String?;
+        if (cropUrl != null && cropUrl.isNotEmpty && cropUrl != 'none') {
+          final filename = Uri.parse(cropUrl).pathSegments.last;
+          pathsToRemove.add('training/$filename');
+        } else {
+          // Fallback backward compatibility
+          final idx = oldC['circle_index'];
+          pathsToRemove.add('training/${appleId}_crop_$idx.jpg');
+        }
+      }
+      if (pathsToRemove.isNotEmpty) {
+        try {
+          await _supabase.storage.from('Apple').remove(pathsToRemove);
+        } catch (_) {}
+      }
+
       await _supabase.from('circles_manual').delete().eq('apple_id', appleId);
 
-      if (circles.isNotEmpty) {
+      if (updatedCircles.isNotEmpty) {
         await _supabase.from('circles_manual').insert(
-          circles.map((c) => c.toJson()).toList()
+          updatedCircles.map((c) => c.toJson()).toList()
         );
       }
 
-      await _supabase.from('manual_review').update({
+      await _supabase.from('manual_review').upsert({
+        'apple_id': appleId,
         'status': 'completed',
         'original_class': originalClass,
         'original_confidence': originalConfidence,
         'corrected_class': decision,
         'updated_by': username,
         'updated_at': DateTime.now().toIso8601String(),
-      }).eq('apple_id', appleId);
+      }, onConflict: 'apple_id');
 
       if (role == 'manager') {
         await exportToTraining(
           appleId: appleId,
           pathologyClass: decision,
-          circles: circles,
+          circles: updatedCircles,
         );
       }
+      return true;
     } catch (e) {
       print('Erro ao concluir triagem: $e');
+      return false;
+    }
+  }
+
+  /// Recupera lista de patologias 'Outras' (personalizadas) registadas no passado
+  static Future<List<String>> getCustomDiseases() async {
+    if (isMockMode) return ['Bitter Rot', 'Frost', 'Stink Bug'];
+    try {
+      final response = await _supabase.from('circles_manual').select('disease');
+      final std = ['Healthy', 'Rot', 'Scab', 'Blotch', 'Anthracnose', 'Outro', 'Unknown'];
+      final set = <String>{};
+      for (var row in response) {
+        final d = row['disease'] as String?;
+        if (d != null && d.trim().isNotEmpty && !std.contains(d.trim())) {
+          set.add(d.trim());
+        }
+      }
+      return set.toList()..sort();
+    } catch (e) {
+      print('Erro ao obter doenças personalizadas: $e');
+      return [];
     }
   }
 
@@ -447,19 +628,68 @@ class SupabaseService {
           .select('apple_id,original_class,corrected_class,original_confidence,status,updated_at,updated_by');
           
       var mappedRows = rows.map((r) => Map<String, dynamic>.from(r as Map)).toList();
-      
-      // Se tivermos os Batches cacheados, podemos filtrar localmente os reviews que pertencem ao lote
+
+      // A tabela manual_review não tem batch_id, inferir o lote pela
+      // location das maçãs em cache, com o MESMO formato de id usado por
+      // getBatches ('LT-' + location normalizada). Sem isto, as matrizes de
+      // confusão/custo por lote mostravam revisões de TODOS os lotes (o mock
+      // filtra corretamente, o que mascarava o problema na demo).
       if (batchId != null && LocalCacheService.inMemoryApples.isNotEmpty) {
-        final targetApples = LocalCacheService.inMemoryApples;
-        // Na falta de batch_id direto, podemos inferir o lote através da localização das maçãs 
-        // ou ignorar o filtro de lote temporariamente. Por agora devolvemos todos, 
-        // ou filtramos pela lista de IDs se conhecêssemos o mapeamento lote->apples.
+        final batchAppleIds = LocalCacheService.inMemoryApples
+            .where((a) => 'LT-${a.location.toUpperCase().replaceAll(' ', '_')}' == batchId)
+            .map((a) => a.id)
+            .toSet();
+        mappedRows = mappedRows
+            .where((r) => batchAppleIds.contains(r['apple_id'] as String? ?? ''))
+            .toList();
       }
-      
+
       return mappedRows;
     } catch (e) {
       print('Erro ao buscar manual_review: $e');
       return [];
+    }
+  }
+
+  /// Fetch incremental de `manual_review` por `updated_at`, usado pelo
+  /// polling periódico (BatchNotifier) para detetar tanto novas triagens
+  /// pendentes como correções concluídas (incluindo reedições posteriores de
+  /// uma linha já 'completed'), sem repetir o SELECT * completo que
+  /// `getManualReviews()` faz. `cursorIso == null` devolve tudo (só acontece
+  /// uma vez, antes de haver cursor persistido). Estritamente `.gt` (não
+  /// `.gte`), o chamador guarda sempre o `updated_at` exato da última linha
+  /// vista como próximo cursor, por isso `.gte` devolveria essa mesma linha
+  /// para sempre (o cursor nunca avança quando não há linhas novas).
+  static Future<List<Map<String, dynamic>>> getManualReviewsSince(String? cursorIso) async {
+    if (isMockMode) return [];
+    try {
+      var query = _supabase
+          .from('manual_review')
+          .select('apple_id,original_class,corrected_class,original_confidence,status,updated_at,updated_by');
+      final rows = cursorIso != null
+          ? await query.gt('updated_at', cursorIso)
+          : await query;
+      return rows.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+    } catch (e) {
+      print('Erro ao buscar delta de manual_review: $e');
+      return [];
+    }
+  }
+
+  /// IDs das maçãs atualmente pendentes de revisão, usado só para semear o
+  /// estado inicial da fila no arranque; depois disso, `getManualReviewsSince`
+  /// mantém o conjunto atualizado de forma incremental.
+  static Future<Set<String>> getPendingReviewIds() async {
+    if (isMockMode) return {};
+    try {
+      final rows = await _supabase
+          .from('manual_review')
+          .select('apple_id')
+          .eq('status', 'pending');
+      return rows.map((r) => r['apple_id'] as String).toSet();
+    } catch (e) {
+      print('Erro ao buscar pendentes de manual_review: $e');
+      return {};
     }
   }
 
@@ -468,7 +698,7 @@ class SupabaseService {
   static Future<List<ProducaoRecord>> getProducaoAtual({int limit = 20}) async {
     if (isMockMode) {
       // Deriva um feed sintético estável a partir dos lotes mock (sem Random
-      // não semeado — evita refresh visual entre polls)
+      // não semeado, evita refresh visual entre polls)
       final batches = generateMockBatches();
       final apples = batches.expand((b) => b.apples).toList()
         ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
@@ -588,38 +818,6 @@ class SupabaseService {
       return loginMock(username, password);
     }
     return await loginProduction(username, password);
-  }
-
-  /// Lê o "lote" (location) atualmente ativo, escolhido pelo operador após o
-  /// login. Se a tabela 'active_lote' estiver vazia, cai para a location da
-  /// maçã mais recente em 'apples'; se não houver nenhuma, devolve null.
-  static Future<String?> getActiveLote() async {
-    if (isMockMode) return 'Linha 1';
-
-    try {
-      final row = await _supabase
-          .from('active_lote')
-          .select('location')
-          .eq('id', 1)
-          .maybeSingle();
-      final location = row?['location'] as String?;
-      if (location != null && location.isNotEmpty) return location;
-    } catch (_) {
-      // tabela pode ainda não existir ou estar vazia — cai para o fallback abaixo
-    }
-
-    try {
-      final rows = await _supabase
-          .from('apples')
-          .select('location')
-          .order('timestamp', ascending: false)
-          .limit(1);
-      if (rows.isNotEmpty) {
-        return rows.first['location'] as String?;
-      }
-    } catch (_) {}
-
-    return null;
   }
 
   /// Grava (upsert) o lote ativo. Chamado pelo operador logo após o login.

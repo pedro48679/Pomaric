@@ -1,0 +1,28 @@
+tabela,contype,definicao
+apples,p,PRIMARY KEY (apple_id)
+circles_manual,p,PRIMARY KEY (id)
+circles_manual,c,CHECK ((circle_index >= 0))
+circles_manual,c,CHECK ((radius > (0)::double precision))
+circles_manual,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON UPDATE CASCADE ON DELETE CASCADE
+cnn_predictions,f,FOREIGN KEY (frame_id) REFERENCES frames(id) ON DELETE CASCADE
+cnn_predictions,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON DELETE CASCADE
+cnn_predictions,p,PRIMARY KEY (id)
+cnn5_multi_confidence,f,FOREIGN KEY (frame_id) REFERENCES frames(id) ON DELETE CASCADE
+cnn5_multi_confidence,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON DELETE CASCADE
+cnn5_multi_confidence,p,PRIMARY KEY (id)
+frames,p,PRIMARY KEY (id)
+frames,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON DELETE CASCADE
+manual_annotation,u,UNIQUE (apple_id)
+manual_annotation,p,PRIMARY KEY (id)
+manual_annotation,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON UPDATE CASCADE ON DELETE CASCADE
+manual_review,u,UNIQUE (apple_id)
+manual_review,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON DELETE CASCADE
+manual_review,p,PRIMARY KEY (id)
+producao_atual,p,PRIMARY KEY (id)
+producao_atual,u,UNIQUE (apple_id)
+producao_atual,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON UPDATE CASCADE ON DELETE RESTRICT
+train_dataset,p,PRIMARY KEY (id)
+train_dataset,f,FOREIGN KEY (apple_id) REFERENCES apples(apple_id) ON UPDATE CASCADE ON DELETE RESTRICT
+workers,p,PRIMARY KEY (id)
+workers,u,UNIQUE (username)
+workers,c,CHECK ((role = ANY (ARRAY['admin'::text, 'operator'::text])))

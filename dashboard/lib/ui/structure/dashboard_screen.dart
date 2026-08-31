@@ -1,29 +1,17 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:printing/printing.dart';
-import 'package:fl_chart/fl_chart.dart';
-import '../../models/models.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/dashboard_provider.dart';
 import '../../utils/constants.dart';
-import '../../widgets/apple_card.dart';
-import '../../widgets/donut_chart_widget.dart';
-import '../../services/pdf_service.dart';
-import '../../services/mjpeg_service.dart';
-import '../../services/supabase_service.dart';
 import '../manual/manual_sorting.dart';
 import '../global_dashboard.dart';
-import '../../widgets/apple_grid_view.dart';
 import '../../widgets/tech_grid_background.dart';
 import '../matrix/matrix_dashboard.dart';
 import '../reports/reports_dashboard.dart';
 import '../mlops/mlops_dashboard.dart';
 import '../iot/iot_dashboard.dart';
+import '../../services/local_cache_service.dart';
 
 class ShadowPieTouchedIndexNotifier extends Notifier<int> {
   @override
@@ -54,7 +42,7 @@ class DashboardScreen extends ConsumerWidget {
       if (previous != next && previous != null) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).clearMaterialBanners();
-        ref.read(headerVisibleProvider.notifier).setVisible(true);
+        ref.read(headerVisibleProvider.notifier).setVisible(next != 'MLOps/ShadowCNN');
       }
     });
 
@@ -70,19 +58,43 @@ class DashboardScreen extends ConsumerWidget {
             if (notification is ScrollUpdateNotification) {
               final delta = notification.scrollDelta ?? 0.0;
               final pixels = notification.metrics.pixels;
-              
-              if (pixels <= 10) {
+
+              // O header só reaparece no topo da página (ou via a pega
+              // abaixo), scroll-up a meio da página NÃO o mostra, de
+              // propósito. Limiar 16 (não ==0): overscroll/bounce pode
+              // nunca voltar a 0 exato e o header ficaria preso escondido.
+              if (pixels <= 16 && currentPage != 'MLOps/ShadowCNN') {
                 ref.read(headerVisibleProvider.notifier).setVisible(true);
               } else if (delta > 3.0) {
                 ref.read(headerVisibleProvider.notifier).setVisible(false);
-              } else if (delta < -3.0) {
-                ref.read(headerVisibleProvider.notifier).setVisible(true);
               }
             }
             return false;
           },
           child: Column(
             children: [
+              // Banner de failsafe: a BD ficou inacessível e a app caiu para
+              // dados de demonstração, sempre visível (independente do
+              // header), até a reconexão automática (~30s) ter sucesso.
+              if (ref.watch(failsafeMockProvider))
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  color: const Color(0xFFB45309),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: const [
+                      Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+                      SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          'Dados de demonstração, BD inacessível. As alterações não estão a ser guardadas; a tentar reconectar automaticamente…',
+                          style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               AnimatedSize(
                 duration: const Duration(milliseconds: 250),
                 curve: Curves.easeInOut,
@@ -94,7 +106,7 @@ class DashboardScreen extends ConsumerWidget {
                 GestureDetector(
                   onTap: () => ref.read(headerVisibleProvider.notifier).setVisible(true),
                   child: Container(
-                    height: 12,
+                    height: 18,
                     width: double.infinity,
                     color: AppColors.surface.withOpacity(0.4),
                     child: Center(
@@ -113,17 +125,17 @@ class DashboardScreen extends ConsumerWidget {
                 child: (currentPage == 'Controlo do Pomar' || currentPage == 'Lote Dashboard')
                     ? const GlobalDashboard()
                     : currentPage == 'IoT & Edge'
-                    ? buildIotDashboard(context, ref)
+                    ? const IotDashboardView()
                     : currentPage == 'MLOps/ShadowCNN'
-                    ? buildMLOpsDashboard(context, ref)
+                    ? const MlopsPage()
                     : currentPage == 'Grelha Lote' ||
                           currentPage == 'Lote Específico'
-                    ? buildDashboardContent(context, ref)
+                    ? const MatrixDashboardView()
                     : currentPage == 'Relatório' || currentPage == 'Reports'
-                    ? buildReportsContent(context, ref)
+                    ? const ReportsView()
                     : currentPage == 'Triagem Manual'
                     ? const ManualSortingView()
-                    : buildPlaceholderContent(currentPage),
+                    : PlaceholderView(page: currentPage),
               ),
             ],
           ),
@@ -161,7 +173,7 @@ class DashboardScreen extends ConsumerWidget {
             dominant = k;
           }
         }
-        return dominant != 'Healthy' && b.urgencyScore > 0.15 && !dismissedIds.contains(b.id);
+        return dominant != 'Healthy' && b.urgencyScore > 0.10 && !dismissedIds.contains(b.id);
       }).length;
 
       final showSystemSurge = stats.surgeAlert != 'Estável' && !dismissedIds.contains('SYSTEM_SURGE');
@@ -240,6 +252,57 @@ class DashboardScreen extends ConsumerWidget {
                   },
                 ),
               ] else ...[
+                IconButton(
+                  icon: const Icon(Icons.sync_problem, color: Colors.orangeAccent),
+                  tooltip: 'Limpar Cache & Sincronizar Tudo',
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        backgroundColor: AppColors.surface,
+                        title: const Text('Limpar Cache?', style: TextStyle(color: Colors.white)),
+                        content: const Text(
+                          'Tem a certeza? Isto vai apagar todos os dados locais e transferir novamente da base de dados.',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+                          ),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Limpar', style: TextStyle(color: Colors.white)),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirm == true) {
+                      await LocalCacheService.clearCache();
+                      ref.invalidate(loadDataFutureProvider);
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Cache limpo! A descarregar todos os dados novamente do Supabase...'),
+                      ));
+                    }
+                  },
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.location_on_outlined, size: 16),
+                  label: Text(currentBatch != null ? 'Lote: ${currentBatch.location}' : 'Escolher lote'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textPrimary,
+                    side: BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
+                  ),
+                  onPressed: () {
+                    // Reutiliza o ecrã de escolha de lote (SetupScreen): ao
+                    // desativar a sessão, o main.dart mostra-o. Aí o produtor
+                    // escolhe o lote, que faz o setBatch e reativa a sessão.
+                    ref.read(sessionActiveProvider.notifier).setActive(false);
+                  },
+                ),
+                const SizedBox(width: 8),
                 ElevatedButton.icon(
                   icon: const Icon(Icons.touch_app, size: 16),
                   label: const Text('Triagem Manual'),
@@ -464,15 +527,15 @@ Widget buildRightSidebar(BuildContext context, WidgetRef ref) {
           buildSidebarItem(
             context,
             ref,
-            'Triagem Manual',
-            Icons.precision_manufacturing,
+            'Grelha Lote',
+            Icons.grid_view,
             currentPage,
           ),
           buildSidebarItem(
             context,
             ref,
-            'Grelha Lote',
-            Icons.grid_view,
+            'Triagem Manual',
+            Icons.precision_manufacturing,
             currentPage,
           ),
           if (isAdmin)
@@ -550,19 +613,15 @@ Widget buildSidebarItem(
     );
   }
 
-Widget buildMetaChip(String label, String value, IconData icon) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, color: AppColors.textSecondary, size: 20),
-        const SizedBox(height: 4),
-        Text(value, style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 14)),
-        Text(label, style: TextStyle(color: AppColors.textSecondary, fontSize: 10)),
-      ],
-    );
-  }
+}
 
-Widget buildPlaceholderContent(String page) {
+/// Conteúdo de fallback para páginas ainda sem tela dedicada.
+class PlaceholderView extends StatelessWidget {
+  final String page;
+  const PlaceholderView({super.key, required this.page});
+
+  @override
+  Widget build(BuildContext context) {
     return Center(
       child: Text(
         'Feature: $page\n(Configuração de software futura)',
@@ -571,7 +630,6 @@ Widget buildPlaceholderContent(String page) {
       ),
     );
   }
-
 }
 
 

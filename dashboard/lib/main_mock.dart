@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'main.dart'; // Importa a app original (main() de lá NÃO é executado)
-import 'providers/auth_provider.dart';
 import 'providers/dashboard_provider.dart';
 import 'services/supabase_service.dart';
 
@@ -12,9 +11,9 @@ import 'services/supabase_service.dart';
 ///   flutter run -d chrome lib/main_mock.dart
 ///
 /// O que muda em relação à versão real:
-///   • Sem chamadas reais ao Supabase — todos os dados são gerados localmente
-///   • Login saltado — entra direto como demo_admin (role: admin)
-///   • Setup screen saltado — sessão já ativa
+///   • Sem chamadas reais ao Supabase, todos os dados são gerados localmente
+///   • Login saltado, entra direto como demo_admin (role: admin)
+///   • Setup screen saltado, sessão já ativa
 ///   • Heartbeat da Raspberry simulado (CPU, RAM, temperatura, etc.)
 ///   • Endpoints MLOps (/classes, /models, /status, /train...) simulados
 ///   • Treino CNN animado localmente (sem GPU, sem dados reais)
@@ -25,13 +24,13 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Inicialização fake do Supabase (evita crash se algum widget aceder à instância)
-  // A URL/key são inválidas intencionalmente — nunca serão usadas em mock mode
+  // A URL/key são inválidas intencionalmente, nunca serão usadas em mock mode
   await Supabase.initialize(
     url: 'https://mock.supabase.co',
     anonKey: 'mock_key_never_used',
   );
 
-  // Ativa mock globalmente — todas as chamadas à BD e HTTP devolvem dados simulados
+  // Ativa mock globalmente, todas as chamadas à BD e HTTP devolvem dados simulados
   SupabaseService.isMockMode = true;
 
   runApp(ProviderScope(
@@ -52,17 +51,5 @@ void main() async {
     ],
     child: const AppleQualityDashboard(),
   ));
-}
-
-/// Admin pré-autenticado para sessão demo.
-class _MockAuthNotifier extends AuthNotifier {
-  @override
-  AppUser? build() => AppUser(username: 'demo_admin', role: UserRole.admin);
-}
-
-/// Sessão sempre ativa (salta SetupScreen em mock mode).
-class _MockSessionNotifier extends SessionActiveNotifier {
-  @override
-  bool build() => true;
 }
 

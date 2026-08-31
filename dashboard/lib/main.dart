@@ -5,6 +5,8 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'providers/auth_provider.dart';
 import 'providers/dashboard_provider.dart';
+import 'services/app_settings_service.dart';
+import 'services/supabase_service.dart';
 import 'ui/structure/dashboard_screen.dart';
 import 'ui/login_screen.dart';
 import 'ui/setup_screen.dart';
@@ -20,17 +22,31 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   if (_supabaseUrl.isEmpty || _supabaseAnonKey.isEmpty) {
-    throw StateError(
+    // Sem credenciais (build sem --dart-define): arranca em modo demonstração
+    // failsafe (com banner de aviso) em vez de crashar num ecrã em branco.
+    debugPrint(
       'SUPABASE_URL / SUPABASE_ANON_KEY em falta. Corre com:\n'
       '  flutter run --dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...\n'
-      'Ver dashboard/README.md para detalhes.',
+      'Ver dashboard/README.md para detalhes. A arrancar em modo demonstração.',
     );
+    SupabaseService.isMockMode = true;
+    SupabaseService.isFailsafeMock = true;
+  } else {
+    try {
+      await Supabase.initialize(
+        url: _supabaseUrl,
+        anonKey: _supabaseAnonKey,
+      );
+      SupabaseService.supabaseReady = true;
+    } catch (e) {
+      // Sem rede no arranque: o failsafe de getBatches nunca chegaria a
+      // correr (o initialize lançava primeiro), cai para demonstração.
+      debugPrint('Supabase.initialize falhou ($e), a arrancar em modo demonstração.');
+      SupabaseService.isMockMode = true;
+      SupabaseService.isFailsafeMock = true;
+    }
   }
-
-  await Supabase.initialize(
-    url: _supabaseUrl,
-    anonKey: _supabaseAnonKey,
-  );
+  await AppSettingsService.load();
   runApp(const ProviderScope(child: AppleQualityDashboard()));
 }
 

@@ -1,3 +1,31 @@
+
+String _normalizeCondition(String condition) {
+  final c = condition.toLowerCase().trim();
+  
+  if (c == 'healthy') return 'Healthy';
+  
+  if (c.contains('frost') || c.contains('frozen') || c.contains('freeze')) {
+    return 'Frost';
+  }
+  
+  if (c.contains('sunburn') || c.contains('sun burned') || c.contains('sun burn')) {
+    return 'Sunburn';
+  }
+  
+  if (c.contains('stinkbug') || c.contains('stink bug')) {
+    return 'Stinkbug';
+  }
+  
+  if (c.contains('blotch')) {
+    return 'Blotch'; // Is visually converted to 'Sooty Blotch' in UI later
+  }
+  
+  if (c == 'brown rot' || c == 'brownrot') return 'Brown Rot';
+  if (c == 'bitter rot' || c == 'bitterrot') return 'Bitter Rot';
+  
+  return c.split(' ').map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}').join(' ');
+}
+
 class FrameData {
   final int id;
   final String url;
@@ -21,14 +49,15 @@ class FrameData {
 
   factory FrameData.fromJson(Map<String, dynamic> json) {
     // DB format compat
-    final label = json['label'] as String? ?? 'Healthy';
+    final rawLabel = json['label'] as String? ?? 'Healthy';
+    final label = _normalizeCondition(rawLabel);
     final conf = (json['confidence'] as num?)?.toDouble() ?? 0.0;
     
     // Local cache format support
     Map<String, double>? probs;
     if (json['probabilities'] != null) {
       probs = Map<String, double>.from(
-        (json['probabilities'] as Map).map((k, v) => MapEntry(k as String, (v as num).toDouble())),
+        (json['probabilities'] as Map).map((k, v) => MapEntry(_normalizeCondition(k as String), (v as num).toDouble())),
       );
     }
     
@@ -122,7 +151,7 @@ class Apple {
       ).firstOrNull;
 
       if (pred != null) {
-        c2Label = pred['label'] as String? ?? 'Healthy';
+        c2Label = _normalizeCondition(pred['label'] as String? ?? 'Healthy');
         c2Conf = (pred['confidence'] as num?)?.toDouble() ?? 0.0;
         model = pred['model_name'] as String? ?? 'Unknown';
       }
@@ -130,7 +159,7 @@ class Apple {
 
     // Local cache fast-path
     if (json['cnn2Label'] != null) {
-      c2Label = json['cnn2Label'];
+      c2Label = _normalizeCondition(json['cnn2Label']);
       c2Conf = (json['cnn2Confidence'] as num).toDouble();
       model = json['modelName'] ?? 'Unknown';
     }
@@ -281,7 +310,7 @@ class Batch {
     final dist = healthDistribution;
     final total = totalApples;
     if (total == 0) return 0.0;
-    double score = (dist['Scab']! * 0.9) + (dist['Blotch']! * 0.7) + (dist['Anthracnose']! * 0.5) + (dist['Rot']! * 0.25);
+    double score = (dist['Rot']! * 0.90) + (dist['Anthracnose']! * 0.75) + (dist['Scab']! * 0.35) + (dist['Blotch']! * 0.20);
     return score / total;
   }
 
@@ -289,12 +318,21 @@ class Batch {
     final dist = healthDistribution;
     final total = totalApples;
     if (total == 0) return 0.0;
-    double score = (dist['Anthracnose']! * 1.0) + (dist['Rot']! * 1.0) + (dist['Scab']! * 0.4) + (dist['Blotch']! * 0.4);
+    double score = (dist['Rot']! * 1.0) + (dist['Anthracnose']! * 1.0) + (dist['Scab']! * 0.4) + (dist['Blotch']! * 0.4);
     return score / total;
   }
 
+  double get healthyRatio {
+    final total = totalApples;
+    if (total == 0) return 0.0;
+    return (healthDistribution['Healthy'] ?? 0) / total;
+  }
+
   double get urgencyScore {
-    return (contaminationScore * 0.4) + (severityScore * 0.6);
+    final rawUrgency = (contaminationScore * 0.4) + (severityScore * 0.6);
+    // Amortecimento biológico por taxa de fruta sã no lote (- 20% * %Saudáveis)
+    final dampened = rawUrgency - (healthyRatio * 0.20);
+    return dampened.clamp(0.0, 1.0);
   }
 
   @override
@@ -324,10 +362,13 @@ class RaspberryHeartbeat {
   final int? uptimeSeconds;
   final int inferenceCount;
   final double? cameraFps;
-  /// Variância de Laplacian do último burst — mede nitidez da lente.
+  /// Variância de Laplacian do último burst, mede nitidez da lente.
   final double? lastBlurScore;
   /// true se [lastBlurScore] < 80 (lente possivelmente suja ou descalibrada).
   final bool blurWarning;
+  /// Config efetiva do script no Pi (chaves snake_case, ex: 'lens_position').
+  /// Usada para fazer seed dos sliders do painel de configuração.
+  final Map<String, dynamic>? config;
 
   RaspberryHeartbeat({
     required this.deviceId,
@@ -344,6 +385,7 @@ class RaspberryHeartbeat {
     this.cameraFps,
     this.lastBlurScore,
     this.blurWarning = false,
+    this.config,
   });
 
   /// Considera offline se não houve heartbeat nos últimos 15 segundos.
@@ -366,6 +408,7 @@ class RaspberryHeartbeat {
       cameraFps: (json['camera_fps'] as num?)?.toDouble(),
       lastBlurScore: (json['last_blur'] as num?)?.toDouble(),
       blurWarning: json['blur_warning'] as bool? ?? false,
+      config: json['config'] as Map<String, dynamic>?,
     );
   }
 
@@ -426,7 +469,7 @@ class ManualAnnotation {
     id: json['id'] as int?,
     appleId: json['apple_id'] as String,
     circleIndex: json['circle_index'] as int? ?? 0,
-    disease: json['disease'] as String? ?? 'Unknown',
+    disease: _normalizeCondition(json['disease'] as String? ?? 'Unknown'),
     x: (json['x'] as num).toDouble(),
     y: (json['y'] as num).toDouble(),
     radius: (json['radius'] as num).toDouble(),
@@ -435,6 +478,31 @@ class ManualAnnotation {
     createdAt: json['created_at'] != null ? DateTime.parse(json['created_at']) : null,
     updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']) : null,
   );
+
+  ManualAnnotation copyWith({
+    String? appleId,
+    int? circleIndex,
+    String? disease,
+    double? x,
+    double? y,
+    double? radius,
+    String? updatedBy,
+    String? crop,
+  }) {
+    return ManualAnnotation(
+      id: id,
+      appleId: appleId ?? this.appleId,
+      circleIndex: circleIndex ?? this.circleIndex,
+      disease: disease ?? this.disease,
+      x: x ?? this.x,
+      y: y ?? this.y,
+      radius: radius ?? this.radius,
+      updatedBy: updatedBy ?? this.updatedBy,
+      crop: crop ?? this.crop,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     if (id != null) 'id': id,
@@ -446,28 +514,6 @@ class ManualAnnotation {
     'radius': radius,
     'updated_by': updatedBy,
     'crop': crop ?? 'none',
-  };
-}
-
-class TriageAnnotation {
-  final String appleId;
-  final String primaryAppleDisease;
-  final String updatedBy;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
-
-  TriageAnnotation({
-    required this.appleId,
-    required this.primaryAppleDisease,
-    required this.updatedBy,
-    this.createdAt,
-    this.updatedAt,
-  });
-
-  Map<String, dynamic> toJson() => {
-    'apple_id': appleId,
-    'primary_apple_disease': primaryAppleDisease,
-    'updated_by': updatedBy,
   };
 }
 
@@ -491,7 +537,7 @@ class CorrectionHistory {
   });
 }
 
-/// Registo da tabela `producao_atual` — resultado final de cada maçã na linha
+/// Registo da tabela `producao_atual`, resultado final de cada maçã na linha
 /// (classe final, confiança, origem da decisão e thumbnail do frame).
 class ProducaoRecord {
   final int id;
@@ -529,7 +575,7 @@ class ProducaoRecord {
       appleId: json['apple_id'] as String? ?? 'APP-?',
       timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
       location: json['location'] as String?,
-      finalClass: json['final_class'] as String? ?? 'Healthy',
+      finalClass: _normalizeCondition(json['final_class'] as String? ?? 'Healthy'),
       finalConfidence: rawConf > 1.0 ? rawConf / 100.0 : rawConf,
       finalSource: json['final_source'] as String? ?? 'IA',
       frameThumbnail: json['frame_thumbnail'] as String?,

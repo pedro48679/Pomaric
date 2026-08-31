@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:math';
 import '../providers/auth_provider.dart';
 import '../providers/dashboard_provider.dart';
-import '../widgets/lote_picker_dialog.dart';
 import '../utils/constants.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -46,19 +45,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final loggedInUser = ref.read(authProvider);
 
       if (loggedInUser != null && loggedInUser.role == UserRole.admin) {
-        // Gestor: vê tudo, todos os lotes agregados — não escolhe lote nenhum.
+        // Gestor: vê tudo, todos os lotes agregados, não escolhe lote nenhum.
         ref.read(currentPageProvider.notifier).setPage('Visão Geral');
         ref.read(sessionActiveProvider.notifier).setActive(true);
         final batches = ref.read(availableBatchesProvider);
         if (batches.isNotEmpty) ref.read(batchProvider.notifier).setBatch(batches.first);
         ref.read(currentPageProvider.notifier).setPage('Controlo do Pomar');
       } else {
-        // Operador: obrigatório escolher o lote da triagem ativa antes de
-        // entrar no Triagem Manual (pode voltar a mudá-lo mais tarde, a partir de lá).
-        // Na vida real, a UI de lote limitaria a um lote, mas aqui deixamos em aberto.
-        await showLotePickerDialog(context, username: username, mandatory: true);
-        if (!mounted) return;
-        ref.read(currentPageProvider.notifier).setPage('Triagem Manual');
+        // Operador: o login autentica o UTILIZADOR; a escolha do lote é o
+        // passo seguinte, no SetupScreen ("login do lote"), que ativa a
+        // sessão e encaminha para o Triagem Manual. Sem diálogo de lote
+        // aqui: era redundante com o SetupScreen (escolha dupla) e, pior,
+        // este ramo nunca ativava a sessão, deixando o operador preso num
+        // ecrã que já não correspondia à página definida.
+        ref.read(currentPageProvider.notifier).setPage('Grelha Lote');
       }
     } catch (e) {
       if (!mounted) return;

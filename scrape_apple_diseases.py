@@ -151,8 +151,8 @@ DISEASE_METADATA = {
         "terms": ["cork spot disorder", "cork spot lesion"]
     },
     "sooty blotch": {
-        "scientific": ["Gloeodes pomigena"],
-        "terms": ["sooty blotch fungus", "sooty blotch spot"]
+        "scientific": ["Gloeodes pomigena", "Phyllachora pomigena"],
+        "terms": ["sooty blotch fungus", "sooty blotch spot", "sooty blotch and flyspeck", "apple blotch", "blotch disease", "blotch lesion"]
     },
     "flyspeck": {
         "scientific": ["Schizothyrium pomi"],
@@ -515,6 +515,7 @@ def main():
              "de bolor/podridão (a doença engana o classificador). Mais seguro filtrar isso mais "
              "tarde, com revisão (ex: filter_apples_rembg.py --preview-rejects).",
     )
+    parser.add_argument("--blotch", action="store_true", help="Modo especial: recolhe no mínimo 300 imagens diversificadas apenas de 'blotch' / 'sooty blotch'")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -544,6 +545,26 @@ def main():
             slug = "_".join(w for w in args.query.split() if not w.startswith("-"))[:60] or "query"
             
         queries_to_run = [(slug, get_query_variations(args.query))]
+    elif args.blotch:
+        args.max_num = max(args.max_num, 300)
+        # Lista massiva de variações só para Blotch, para garantir as 300 imagens
+        blotch_vars = [
+            '"apple fruit" "sooty blotch"',
+            '"apple fruit" "blotch"',
+            '"apple fruit" "sooty blotch and flyspeck"',
+            '"apple" "blotch disease"',
+            '"apple fruit" "apple blotch"',
+            '"apple" "Gloeodes pomigena"',
+            '"apple" "Phyllachora pomigena"',
+            '"apple" "sooty blotch fungus"',
+            '"malus domestica" "sooty blotch"',
+            '"malus domestica" "blotch"',
+            '"apple fruit" "blotch lesion"',
+            '"apple fruit" "sooty blotch spot"',
+            'isolated "apple fruit" "blotch"',
+            'macro "apple" "blotch"'
+        ]
+        queries_to_run = [("blotch-new", blotch_vars)]
     else:
         queries_to_run = [(d.replace(" ", "_"), get_query_variations(d)) for d in DISEASES]
 

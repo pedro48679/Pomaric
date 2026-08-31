@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WebSocket server to receive image+json from Raspberry Pi and save to folders.
 Usage:
-  python ws_server.py --host 0.0.0.0 --port 8765 --image-dir "./TempRaspberry/Imagens" --json-dir "./TempRaspberry/Jsonn"
+  python ws_server.py --host 0.0.0.0 --port 8765 --image-dir "C:/auditoria_logs/Imagens" --json-dir "C:/auditoria_logs/Jsonn"
 
 Requires: websockets, asyncio, base64, json
 """
@@ -9,11 +9,22 @@ import argparse
 import asyncio
 import base64
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import websockets
+
+# Sanitiza qualquer token vindo do payload antes de o usar num nome de ficheiro.
+# Impede path traversal (ex. label='../../x') a partir de um cliente WebSocket
+# não autenticado — só letras/dígitos/._- passam.
+_SAFE_RE = re.compile(r'[^A-Za-z0-9._-]')
+
+
+def _safe_token(value, fallback: str = 'x', maxlen: int = 80) -> str:
+    s = _SAFE_RE.sub('_', str(value))[:maxlen]
+    return s or fallback
 
 # ---------------------------------------------------------------------------
 # Heartbeat state — shared between asyncio handler and HTTP server thread
@@ -81,7 +92,10 @@ class _HeartbeatHTTPHandler(BaseHTTPRequestHandler):
 
 
 def _start_heartbeat_http_server(port: int = 8766):
-    server = HTTPServer(('0.0.0.0', port), _HeartbeatHTTPHandler)
+    # 127.0.0.1 (não 0.0.0.0): /command reinicia o Pi com flags arbitrárias via
+    # os.execv, e a dashboard consome estes endpoints só por localhost. Ligar à
+    # LAN exporia um vetor de reinício/execução não autenticado.
+    server = HTTPServer(('127.0.0.1', port), _HeartbeatHTTPHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True, name='HeartbeatHTTP')
     t.start()
     print(f'[Heartbeat] HTTP endpoint activo em: http://localhost:{port}/heartbeat')
@@ -127,7 +141,7 @@ async def handler(websocket, image_dir: Path, json_dir: Path):
                     await websocket.send(json.dumps({'status': 'error', 'error': 'Empty burst frames'}))
                     continue
 
-                overall_label = data.get('label') or 'unknown'
+                overall_label = _safe_token(data.get('label') or 'unknown')
                 overall_conf = data.get('confidence') or 0.0
                 location = data.get('location') or 'Linha 1'
 
@@ -135,6 +149,7 @@ async def handler(websocket, image_dir: Path, json_dir: Path):
                 # Fallback ao esquema antigo (contagem de ficheiros) só se não vier no payload.
                 apple_id = data.get('apple_id')
                 if apple_id:
+                    apple_id = _safe_token(apple_id)
                     file_id = apple_id
                 else:
                     existing_ids = []
@@ -158,8 +173,16 @@ async def handler(websocket, image_dir: Path, json_dir: Path):
                     f_crop_b64 = f_data.get('crop_image_b64')
                     f_img_resized_b64 = f_data.get('image_resized_b64')
 
-                    fname_crop = f"{prefix}{file_id}_frame{frame_num}_crop.jpg"
-                    fname_resized = f"{prefix}{file_id}_frame{frame_num}_224.jpg"
+                    # Label por frame (opcional): scripts mais recentes (ver
+                    # raspberry_multi_apple.py) já mandam a classe REAL do CNN2
+                    # por frame, em vez do placeholder 'unknown' de topo — usa-se
+                    # aqui só para nomear o ficheiro, não afeta a decisão da CNN5
+                    # (cnn5_watcher.py ignora o nome, só lê os paths do JSON).
+                    # Sem o campo (payload do golden atual), cai no overall_label.
+                    frame_label = _safe_token(f_data.get('label') or overall_label)
+                    frame_tag = _safe_token(frame_num)  # só para o nome; frame_num (int) mantém-se no JSON
+                    fname_crop = f"{frame_label}_{file_id}_frame{frame_tag}_crop.jpg"
+                    fname_resized = f"{frame_label}_{file_id}_frame{frame_tag}_224.jpg"
 
                     crop_path = None
                     if f_crop_b64:
@@ -177,6 +200,8 @@ async def handler(websocket, image_dir: Path, json_dir: Path):
                         'frame': frame_num,
                         'crop': str(crop_path) if crop_path else None,
                         'resized': str(img_resized_path) if img_resized_path else None,
+                        'cnn2_label': f_data.get('label'),
+                        'cnn2_confidence': f_data.get('confidence'),
                     })
 
                 # Salvar um único arquivo JSON unificado
@@ -209,7 +234,7 @@ async def handler(websocket, image_dir: Path, json_dir: Path):
                 img_b64 = data.get('image_b64')
                 crop_img_b64 = data.get('crop_image_b64')
                 img_resized_b64 = data.get('image_resized_b64')
-                label = data.get('label') or 'unknown'
+                label = _safe_token(data.get('label') or 'unknown')
                 conf = data.get('confidence')
 
                 existing_ids = []

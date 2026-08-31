@@ -1,0 +1,66 @@
+table_name,column_name,data_type,is_nullable,column_default,is_identity,identity_generation
+apples,apple_id,text,NO,null,NO,null
+apples,timestamp,timestamp with time zone,YES,now(),NO,null
+apples,location,text,YES,null,NO,null
+circles_manual,circle_index,integer,NO,null,NO,null
+circles_manual,disease,text,NO,null,NO,null
+circles_manual,x,double precision,NO,null,NO,null
+circles_manual,y,double precision,NO,null,NO,null
+circles_manual,radius,double precision,NO,null,NO,null
+circles_manual,updated_by,text,YES,null,NO,null
+circles_manual,created_at,timestamp with time zone,NO,now(),NO,null
+circles_manual,id,integer,NO,null,YES,BY DEFAULT
+circles_manual,apple_id,text,NO,null,NO,null
+circles_manual,crop,text,YES,null,NO,null
+cnn_predictions,id,integer,NO,null,YES,BY DEFAULT
+cnn_predictions,apple_id,text,NO,null,NO,null
+cnn_predictions,model_name,text,NO,null,NO,null
+cnn_predictions,label,text,YES,null,NO,null
+cnn_predictions,confidence,double precision,YES,null,NO,null
+cnn_predictions,timestamp,timestamp with time zone,YES,now(),NO,null
+cnn_predictions,frame_id,integer,YES,null,NO,null
+cnn5_multi_confidence,id,integer,NO,null,YES,BY DEFAULT
+cnn5_multi_confidence,apple_id,text,NO,null,NO,null
+cnn5_multi_confidence,frame_id,integer,NO,null,NO,null
+cnn5_multi_confidence,class_label,text,NO,null,NO,null
+cnn5_multi_confidence,confidence,double precision,NO,null,NO,null
+cnn5_multi_confidence,created_at,timestamp with time zone,YES,now(),NO,null
+frames,id,integer,NO,nextval('frames_id_seq'::regclass),NO,null
+frames,apple_id,text,NO,null,NO,null
+frames,frame_idx,integer,YES,null,NO,null
+frames,image_url,text,YES,null,NO,null
+frames,label,text,YES,null,NO,null
+frames,confidence,double precision,YES,null,NO,null
+frames,is_worst_case,boolean,YES,false,NO,null
+manual_annotation,apple_id,text,NO,null,NO,null
+manual_annotation,primary_apple_disease,text,YES,null,NO,null
+manual_annotation,updated_by,text,YES,null,NO,null
+manual_annotation,created_at,timestamp with time zone,NO,now(),NO,null
+manual_annotation,updated_at,timestamp with time zone,YES,now(),NO,null
+manual_annotation,id,integer,NO,null,YES,BY DEFAULT
+manual_review,apple_id,text,NO,null,NO,null
+manual_review,status,text,NO,'pending'::text,NO,null
+manual_review,updated_at,timestamp with time zone,YES,now(),NO,null
+manual_review,corrected_class,text,YES,null,NO,null
+manual_review,updated_by,text,YES,null,NO,null
+manual_review,original_class,text,YES,null,NO,null
+manual_review,original_confidence,bigint,YES,null,NO,null
+manual_review,id,integer,NO,null,YES,BY DEFAULT
+producao_atual,apple_id,text,NO,null,NO,null
+producao_atual,timestamp,timestamp with time zone,YES,now(),NO,null
+producao_atual,location,text,YES,null,NO,null
+producao_atual,final_class,text,YES,null,NO,null
+producao_atual,final_confidence,double precision,YES,null,NO,null
+producao_atual,final_source,text,YES,null,NO,null
+producao_atual,frame_thumbnail,text,YES,null,NO,null
+producao_atual,id,integer,NO,null,YES,BY DEFAULT
+train_dataset,apple_id,text,NO,null,NO,null
+train_dataset,class,text,YES,null,NO,null
+train_dataset,id,integer,NO,null,YES,BY DEFAULT
+workers,id,text,NO,null,NO,null
+workers,username,text,NO,null,NO,null
+workers,password_hash,text,NO,null,NO,null
+workers,role,text,NO,null,NO,null
+workers,is_active,boolean,NO,true,NO,null
+workers,created_at,timestamp with time zone,NO,now(),NO,null
+workers,updated_at,timestamp with time zone,YES,null,NO,null

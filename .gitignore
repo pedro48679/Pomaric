@@ -1,67 +1,109 @@
-# Ignore everything by default
-*
+# ==============================================================================
+# Gitignore - Projeto Pomaric (Classificação de Maçãs, Edge AI & Dashboard)
+# ==============================================================================
 
-# Allow directory traversal for allowed folders
-!dashboard/
-!suporte_camera/
-!ONXX/
-!print/
+# ------------------------------------------------------------------------------
+# 1. Ambientes Virtuais e Cache Python
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.ipynb_checkpoints/
 
-# Allow everything inside the permitted folders
-!dashboard/**
-!suporte_camera/**
+# ------------------------------------------------------------------------------
+# 2. Caches e Artefactos de Build do Flutter / Dart (Dashboard)
+# ------------------------------------------------------------------------------
+dashboard/build/
+dashboard/.dart_tool/
+dashboard/local_db/
+dashboard/.pub/
+dashboard/.pub-cache/
+dashboard/.flutter-plugins-dependencies
+dashboard/ios/Flutter/.last_build_id
+dashboard/*.iml
+dashboard/android/app/debug/
+dashboard/android/app/profile/
+dashboard/android/app/release/
 
-# RE-IGNORE SECRETS DENTRO DO DASHBOARD
-dashboard/android/app/google-services.json
-dashboard/ios/Runner/GoogleService-Info.plist
-dashboard/firebase.json
-.env
-
-!print/**
-
-# ...except one-off dev/scratch files inside dashboard/ that add no value
-# to the public repo (encoding-fix scripts, throwaway notes/backups).
+# Ficheiros/logs temporários de desenvolvimento dentro do dashboard
 dashboard/fix.py
 dashboard/fix_imports.py
 dashboard/fix_text.py
 dashboard/refactor_batch.py
-dashboard/scratch_layout.txt
-dashboard/scratch_scatter.txt
-dashboard/batch_upgrade.md
-dashboard/REDESIGN_PLAN.md
-dashboard/SPC_CHARTS_BACKUP.md
+dashboard/scratch_*.txt
+dashboard/analyze_full.txt
+dashboard/*.log
 
-# Allow specific core files in the root directory
-!.gitignore
-!README.md
-!db_schema.md
-!requirements.txt
-!CNN2.py
-!CNN5.py
-!pipeline_apple_bom.ipynb
-!gradcam_galeria_interativa.py
-!RGBA_format.py
-!split_multi_apple_crops.py
-!scrape_apple_diseases.py
-!supabase_data.py
-!inference_server.py
-!start_all.ps1
-!stop_all.ps1
+# ------------------------------------------------------------------------------
+# 3. Modelos Pesados de IA e Datasets Temporários
+# ------------------------------------------------------------------------------
+# Ignorar modelos .pth gigantes intermédios (exceto modelos chave se necessário)
+melhor_weight_multiclass_RESnet50_*.pth
+!melhor_weight_multiclass_RESnet50_BEST.pth
 
-# Allow specific files in the ONXX folder
+# Pastas de dados temporários e caches locais
+apples_2026/
+pipeline_ALL_night_done/
+scrappa/
+TempRaspberry/
+_rejeitadas/
 
-!ONXX/export_quantize_onnx.py
-!ONXX/ws_server.py
-!ONXX/raspberry_camera_format.py
-!ONXX/cnn5_watcher.py
-!ONXX/mlops_server.py
-!ONXX/shadow_runner.py
-!ONXX/raspberry.md
-!ONXX/requirements_export.txt
+# ------------------------------------------------------------------------------
+# 4. Ficheiros Auxiliares LaTeX e Rascunhos de Documentação
+# ------------------------------------------------------------------------------
+*.aux
+*.toc
+*.out
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.log
 
-# Bloquear todos os ficheiros .md e .tex em qualquer pasta
-*.md
-*.tex
+# Rascunhos markdown de progresso / ideias
+casos_uso_bruto_plantuml.md
+diagramas_seq.md
+diagramas_atividade.md
+comparacao_modelos.md
+revisao_conclusao.md
+REDESIGN_PLAN.md
+SPC_CHARTS_BACKUP.md
+batch_upgrade.md
+AUTENTICACAO_RESUMO.md
 
-# Mas permitir a exceção exclusiva para o README principal
-!README.md
+# ------------------------------------------------------------------------------
+# 5. Ficheiros de Chaves / Segredos / Credenciais
+# ------------------------------------------------------------------------------
+.env
+secrets.local.ps1
+dashboard/android/app/google-services.json
+dashboard/ios/Runner/GoogleService-Info.plist
+dashboard/firebase.json
+
+# Ficheiros com URL do projeto Supabase hardcoded
+supabase_data.py
+ONXX/raspberry_camera_format.py
+
+# Ficheiros .service com referências ao projeto Supabase
+ONXX/pomaric-camera.service
+ONXX/pomaric-camera_new.service
+
+# ------------------------------------------------------------------------------
+# 6. IDEs, Editores e Sistema Operativo
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

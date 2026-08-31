@@ -15,14 +15,20 @@ Em caso de sucesso apaga as imagens locais e marca o JSON como processado
 ('cnn5_processed': true) — o JSON fica como log leve e permanente; a ausência
 dessa marca é o que identifica uma maçã nova por processar.
 
+Deteta JSONs novos em tempo real via watchdog (Observer sobre a pasta), com um
+varrimento periódico de segurança (--interval) que apanha ficheiros já presentes
+no arranque e eventos eventualmente perdidos. JSONs concluídos são movidos para
+Jsonn/done/; os que falham MAX_ATTEMPTS vezes para Jsonn/failed/.
+
 Uso:
-  python cnn5_watcher.py --json-dir "C:/.../TempRaspberry/Jsonn" --interval 5
+  python cnn5_watcher.py --json-dir "C:/auditoria_logs/Jsonn" --interval 60
 """
 import argparse
 import datetime
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -32,6 +38,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 import shadow_runner
 
@@ -39,6 +47,22 @@ SUPABASE_URL = shadow_runner.SUPABASE_URL
 SUPABASE_KEY = shadow_runner.SUPABASE_KEY
 BUCKET_NAME = "Apple"
 JPEG_QUALITY = 85
+
+# Subpasta dentro do bucket 'Apple' para onde vão as imagens. Pasta de teste
+# "2026" por agora; troca para a pasta real quando validado e reinicia.
+# TEM de coincidir com STORAGE_FOLDER em raspberry_camera_format_FUNCIONA.py.
+STORAGE_FOLDER = "2026"
+
+# Número de tentativas antes de dar uma maçã como falhada (evita reprocessamento
+# infinito de um JSON que rebenta sempre — ex. imagem corrompida, coluna em falta).
+MAX_ATTEMPTS = 5
+# Segundos que um JSON tem de estar "quieto" (sem escrita) antes de o processarmos.
+# O ws_server.py escreve o ficheiro de forma não atómica, por isso um evento de
+# criação pode chegar antes de o conteúdo estar completo.
+STABILITY_SECONDS = 0.5
+# Confiança mínima para gravar uma linha em cnn5_multi_confidence (multi-confiança
+# por classe). Abaixo disto é ruído de softmax. Igual ao supabase_data.py.
+MIN_CLASS_SCORE = 0.05
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -76,6 +100,13 @@ def get_target_layer(model, architecture: str):
 def classify_only(model, classes, device, image_path: Path) -> tuple[str, float]:
     """Classificação rápida (sem hooks/backward) — usada nos N frames para
     decidir qual é o worst_case antes de gastar o Grad-CAM só nesse."""
+    label, conf, _ = classify_full(model, classes, device, image_path)
+    return label, conf
+
+
+def classify_full(model, classes, device, image_path: Path) -> tuple[str, float, dict]:
+    """Como classify_only, mas devolve também o vetor completo de probabilidades
+    por classe {classe: prob} — usado para preencher cnn5_multi_confidence."""
     img = Image.open(image_path).convert('RGB')
     tensor = transform(img).unsqueeze(0).to(device)
 
@@ -86,7 +117,9 @@ def classify_only(model, classes, device, image_path: Path) -> tuple[str, float]
 
     idx = int(pred.item())
     label = classes[idx] if idx < len(classes) else 'unknown'
-    return label, float(conf.item())
+    n = min(len(classes), prob.shape[0])
+    probs = {classes[i]: float(prob[i].item()) for i in range(n)}
+    return label, float(conf.item()), probs
 
 
 def classify_with_gradcam(model, classes, device, architecture: str,
@@ -150,10 +183,13 @@ def classify_with_gradcam(model, classes, device, architecture: str,
     return label, float(conf.item())
 
 
-def upload_to_supabase(sb, local_path: Path, apple_id: str, frame_idx, suffix: str = '') -> str | None:
+def upload_to_supabase(sb, local_path: Path, apple_id: str, frame_idx, label: str, suffix: str = '') -> str | None:
     try:
-        file_name = f"{apple_id}_frame{frame_idx}{suffix}.jpg"
-        path_on_supa = f"{datetime.datetime.utcnow().year}/{file_name}"
+        # Nome começa pela classe atribuída pela CNN5 a esta imagem (Healthy ou a
+        # patologia), ex.: Scab_20260723T..._frame1.jpg. Facilita ler o dataset.
+        safe_label = ''.join(ch if ch.isalnum() else '_' for ch in str(label)) or 'unknown'
+        file_name = f"{safe_label}_{apple_id}_frame{frame_idx}{suffix}.jpg"
+        path_on_supa = f"{STORAGE_FOLDER}/{file_name}"
         with open(local_path, 'rb') as f:
             sb.storage.from_(BUCKET_NAME).upload(
                 file=f, path=path_on_supa,
@@ -165,11 +201,55 @@ def upload_to_supabase(sb, local_path: Path, apple_id: str, frame_idx, suffix: s
         return None
 
 
+def _delete_apple_rows(sb, apple_id: str) -> None:
+    """Apaga todas as linhas desta maçã, em ordem de dependência (filhos -> pai),
+    para que um reprocessamento parta de estado limpo. Torna a escrita idempotente:
+    se uma tentativa anterior falhou a meio (ex. inseriu 'apples' mas não os
+    'frames'), a próxima não duplica nem rebenta em constraint de PK/UNIQUE."""
+    for table in ('cnn_predictions', 'cnn5_multi_confidence', 'frames', 'producao_atual', 'apples'):
+        try:
+            sb.table(table).delete().eq('apple_id', apple_id).execute()
+        except Exception as e:
+            print(f'[CNN5] Aviso: falha a limpar {table} para {apple_id}: {e}')
+
+
+def _archive_json(json_path: Path, subdir: str) -> None:
+    """Move o JSON para Jsonn/<subdir>/ (done ou failed). O Observer vigia Jsonn/
+    de forma não recursiva, por isso mover para uma subpasta não re-dispara eventos
+    e o glob do sweep passa a varrer só pendentes."""
+    try:
+        dest_dir = json_path.parent / subdir
+        dest_dir.mkdir(exist_ok=True)
+        os.replace(str(json_path), str(dest_dir / json_path.name))  # os.replace sobrepõe no Windows
+    except Exception as e:
+        print(f'[CNN5] Aviso: não consegui arquivar {json_path.name} em {subdir}/: {e}')
+
+
 def process_burst_json(sb, model, classes, device, architecture, json_path: Path) -> bool:
     meta = json.loads(json_path.read_text(encoding='utf-8'))
-    if meta.get('cnn5_processed'):
+    if meta.get('cnn5_processed') or meta.get('cnn5_failed'):
         return False
 
+    try:
+        return _process_burst_json_inner(sb, model, classes, device, architecture, json_path, meta)
+    except Exception as e:
+        # Regista a tentativa; ao fim de MAX_ATTEMPTS desiste e arquiva em failed/.
+        attempts = int(meta.get('cnn5_attempts', 0)) + 1
+        meta['cnn5_attempts'] = attempts
+        meta['cnn5_last_error'] = str(e)
+        if attempts >= MAX_ATTEMPTS:
+            meta['cnn5_failed'] = True
+            meta['cnn5_failed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            json_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+            _archive_json(json_path, 'failed')
+            print(f'[CNN5] {json_path.name}: falhou {attempts}x, arquivado em failed/ ({e})')
+        else:
+            json_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+            print(f'[CNN5] {json_path.name}: erro (tentativa {attempts}/{MAX_ATTEMPTS}): {e}')
+        return False
+
+
+def _process_burst_json_inner(sb, model, classes, device, architecture, json_path: Path, meta: dict) -> bool:
     saved_images = meta.get('saved_images') or []
     if not saved_images:
         print(f'[CNN5] {json_path.name}: sem imagens associadas, a ignorar.')
@@ -177,7 +257,7 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
 
     apple_id = meta.get('apple_id') or str(meta.get('id'))
     location = meta.get('location') or 'Linha 1'
-    timestamp = datetime.datetime.utcnow().isoformat()
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     classified = []
     for entry in saved_images:
@@ -185,10 +265,10 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
         if not img_path_str or not Path(img_path_str).exists():
             continue
         img_path = Path(img_path_str)
-        label, confidence = classify_only(model, classes, device, img_path)
+        label, confidence, probs = classify_full(model, classes, device, img_path)
         classified.append({
             'frame': entry.get('frame'), 'label': label, 'confidence': confidence,
-            'path': img_path, 'entry': entry,
+            'path': img_path, 'entry': entry, 'probs': probs,
         })
 
     if not classified:
@@ -213,8 +293,8 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
             label, confidence = classify_with_gradcam(
                 model, classes, device, architecture, c['path'], gradcam_tmp
             )
-            image_url = upload_to_supabase(sb, c['path'], apple_id, c['frame'])
-            upload_to_supabase(sb, gradcam_tmp, apple_id, c['frame'], suffix='_gradcam')
+            image_url = upload_to_supabase(sb, c['path'], apple_id, c['frame'], label)
+            upload_to_supabase(sb, gradcam_tmp, apple_id, c['frame'], label, suffix='_gradcam')
             frame_results[c['frame']] = (label, confidence, image_url)
             gradcam_tmp.unlink(missing_ok=True)
 
@@ -223,13 +303,16 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
     else:
         # 'Healthy' final: só a imagem do worst_case sobe, sem Grad-CAM
         # (mesma regra do caminho confiante — não há doença para realçar).
-        image_url = upload_to_supabase(sb, worst['path'], apple_id, worst['frame'])
+        image_url = upload_to_supabase(sb, worst['path'], apple_id, worst['frame'], worst['label'])
         frame_results[worst['frame']] = (worst['label'], worst['confidence'], image_url)
         worst_label, worst_conf = worst['label'], worst['confidence']
 
     print(f'[CNN5] {apple_id}: {len(classified)} frames classificados '
           f'({len(frame_results)} enviados ao bucket), '
           f'worst_case=frame{worst["frame"]} -> {worst_label} ({worst_conf:.2%})')
+
+    # Idempotência: limpa qualquer escrita parcial desta maçã antes de reescrever.
+    _delete_apple_rows(sb, apple_id)
 
     sb.table('apples').insert({
         'apple_id': apple_id, 'timestamp': timestamp, 'location': location,
@@ -245,19 +328,57 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
             label, confidence, image_url = c['label'], c['confidence'], None
         if is_worst:
             worst_thumbnail_url = image_url
+        entry = c.get('entry') or {}
         frame_rows.append({
             'apple_id': apple_id, 'frame_idx': c['frame'], 'image_url': image_url,
             'label': label, 'confidence': confidence, 'is_worst_case': is_worst,
+            # Veredito da CNN2 (Raspberry) para esta imagem, se veio no payload.
+            'cnn2_label': entry.get('cnn2_label'),
+            'cnn2_confidence': entry.get('cnn2_confidence'),
+            # Vetor completo de probabilidades da CNN5 (para cnn5_multi_confidence).
+            'probs': c.get('probs') or {},
         })
 
+    worst_frame_id = None
     for row in frame_rows:
-        res = sb.table('frames').insert(row).execute()
+        res = sb.table('frames').insert({
+            'apple_id': row['apple_id'], 'frame_idx': row['frame_idx'],
+            'image_url': row['image_url'], 'label': row['label'],
+            'confidence': row['confidence'], 'is_worst_case': row['is_worst_case'],
+        }).execute()
         frame_id = res.data[0]['id'] if res.data else None
         if frame_id is not None:
+            # CNN5: uma linha por frame (os n frames).
             sb.table('cnn_predictions').insert({
                 'apple_id': apple_id, 'frame_id': frame_id, 'model_name': 'CNN5',
                 'label': row['label'], 'confidence': row['confidence'], 'timestamp': timestamp,
             }).execute()
+            if row['is_worst_case']:
+                worst_frame_id = frame_id
+
+            # Multi-confiança por classe: só para maçãs cujo veredito final é
+            # doença (mesma regra do supabase_data.py). Uma linha por classe com
+            # prob >= MIN_CLASS_SCORE — alimenta o radar/co-confusão da dashboard.
+            if is_diseased and row.get('probs'):
+                class_scores = [
+                    {'apple_id': apple_id, 'frame_id': frame_id,
+                     'class_label': cls, 'confidence': conf}
+                    for cls, conf in row['probs'].items()
+                    if conf >= MIN_CLASS_SCORE
+                ]
+                if class_scores:
+                    sb.table('cnn5_multi_confidence').insert(class_scores).execute()
+
+    # CNN2 (gatekeeper): UMA linha por maçã, ligada ao worst frame. 'Disease'
+    # quando o resultado é patologia, senão 'Healthy' — nunca 'Unhealthy' na BD.
+    # A opinião por frame da CNN2 fica só na pasta do PC (JSON + nome do ficheiro).
+    if worst_frame_id is not None:
+        worst_cnn2_conf = (worst.get('entry') or {}).get('cnn2_confidence')
+        sb.table('cnn_predictions').insert({
+            'apple_id': apple_id, 'frame_id': worst_frame_id, 'model_name': 'CNN2',
+            'label': 'Disease' if is_diseased else 'Healthy',
+            'confidence': worst_cnn2_conf, 'timestamp': timestamp,
+        }).execute()
 
     sb.table('producao_atual').insert({
         'apple_id': apple_id,
@@ -284,7 +405,33 @@ def process_burst_json(sb, model, classes, device, architecture, json_path: Path
     meta['cnn5_processed_at'] = timestamp
     json_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
 
+    # Arquiva o JSON processado em Jsonn/done/ (o glob do sweep só vê pendentes).
+    _archive_json(json_path, 'done')
+
     return True
+
+
+class _JsonEventHandler(FileSystemEventHandler):
+    """Enfileira JSONs novos/movidos para Jsonn/ assim que o watchdog os deteta.
+    A via principal (tempo real); o sweep periódico em run() é só a rede de segurança."""
+
+    def __init__(self, on_json):
+        self._on_json = on_json
+
+    def on_created(self, event):
+        self._maybe(event.src_path, event.is_directory)
+
+    def on_modified(self, event):
+        self._maybe(event.src_path, event.is_directory)
+
+    def on_moved(self, event):
+        self._maybe(getattr(event, 'dest_path', ''), event.is_directory)
+
+    def _maybe(self, path, is_directory):
+        if is_directory or not path:
+            return
+        if str(path).lower().endswith('.json'):
+            self._on_json(Path(path))
 
 
 def run(json_dir: Path, interval: int):
@@ -294,26 +441,77 @@ def run(json_dir: Path, interval: int):
     model_name, architecture = get_production_model_meta()
     model, classes, device = shadow_runner.load_shadow_model(model_name)
 
-    print(f'[CNN5] Watcher a vigiar {json_dir} a cada {interval}s '
+    json_dir.mkdir(parents=True, exist_ok=True)
+
+    pending: set[Path] = set()
+    lock = threading.Lock()
+
+    def enqueue(p: Path):
+        # Só ficheiros diretamente em json_dir; ignora Jsonn/done/ e Jsonn/failed/.
+        try:
+            if p.parent != json_dir:
+                return
+        except Exception:
+            return
+        with lock:
+            pending.add(p)
+
+    def sweep():
+        for jp in json_dir.glob('*.json'):
+            enqueue(jp)
+
+    handler = _JsonEventHandler(enqueue)
+    observer = Observer()
+    observer.schedule(handler, str(json_dir), recursive=False)
+    observer.start()
+
+    sweep()  # arranque: apanha JSONs já presentes antes de o watcher iniciar
+    last_sweep = time.time()
+
+    print(f'[CNN5] watchdog a vigiar {json_dir} (sweep de segurança cada {interval}s) '
           f'(modelo: {model_name}, arquitetura: {architecture}, device: {device})')
 
-    while True:
-        try:
-            for json_path in sorted(json_dir.glob('*.json')):
-                try:
-                    process_burst_json(sb, model, classes, device, architecture, json_path)
-                except Exception as e:
-                    print(f'[CNN5] Erro a processar {json_path.name}: {e}')
-        except Exception as e:
-            print(f'[CNN5] Erro no loop: {e}')
+    try:
+        while True:
+            now = time.time()
+            if now - last_sweep >= interval:
+                sweep()
+                last_sweep = now
 
-        time.sleep(interval)
+            with lock:
+                batch = list(pending)
+
+            for jp in batch:
+                if not jp.exists():
+                    with lock:
+                        pending.discard(jp)
+                    continue
+                # Espera o ficheiro estabilizar (escrita não atómica do ws_server).
+                try:
+                    if time.time() - jp.stat().st_mtime < STABILITY_SECONDS:
+                        continue  # ainda a ser escrito; volta a tentar no próximo ciclo
+                except OSError:
+                    continue
+                with lock:
+                    pending.discard(jp)
+                try:
+                    process_burst_json(sb, model, classes, device, architecture, jp)
+                except Exception as e:
+                    print(f'[CNN5] Erro a processar {jp.name}: {e}')
+
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print('[CNN5] A terminar (Ctrl+C)...')
+    finally:
+        observer.stop()
+        observer.join()
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--json-dir', required=True, help='Pasta de JSONs gravada pelo ws_server.py')
-    p.add_argument('--interval', type=int, default=5, help='Segundos entre ciclos de polling (default 5)')
+    p.add_argument('--interval', type=int, default=60,
+                   help='Segundos entre varrimentos de segurança (rede; a via principal é o watchdog). Default 60')
     args = p.parse_args()
     run(Path(args.json_dir), args.interval)
 

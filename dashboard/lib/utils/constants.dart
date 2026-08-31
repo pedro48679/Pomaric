@@ -6,7 +6,7 @@ class AppConstants {
   static const String heartbeatUrl = 'http://localhost:8766/heartbeat';
 
   /// URL do stream MJPEG servido diretamente pelo raspberry_camera_format.py
-  /// (modo --stream) na Raspberry Pi 5 — servidor embutido, sem processo
+  /// (modo --stream) na Raspberry Pi 5, servidor embutido, sem processo
   /// separado (mjpeg_server.py foi descontinuado: a câmara só suporta um
   /// consumidor de Picamera2 de cada vez).
   /// Ajusta o IP conforme a rede local (ex: ipconfig no PC, inet addr no Pi).
@@ -38,12 +38,25 @@ class AppColors {
   static Color get primary => isDark ? const Color(0xFF00FFC4) : const Color(0xFF00A383); // Radiant Neon Mint-Cyan / Bright Emerald
   static Color get accent => const Color(0xFF10B981); // Emerald Green
   
-  static Color get healthy => const Color(0xFF10B981);
-  static Color get rot => const Color(0xFFFF4D6D); // Vibrant Neon Red
-  static Color get blotch => const Color(0xFF8B5CF6); // Violet
-  static Color get scab => const Color(0xFFF59E0B); // Amber
-  static Color get anthracnose => const Color(0xFFEC4899); // Pink
+  // 15 Cores Distintas para Patologias (Otimizadas para Dashboard e Contraste)
+  static Color get healthy => const Color(0xFF10B981); // Verde Esmeralda
+  static Color get rot => const Color(0xFF722F37); // Vinho Tinto Escuro
+  static Color get sunburn => const Color(0xFFFF1744); // Vermelho Vivo
+  static Color get stinkbug => const Color(0xFFB4C424); // Verde Amarelado
+  static Color get frost => const Color(0xFF00E5FF); // Azul Gelo / Ciano
   
+  static Color get scab => const Color(0xFFF59E0B); // Laranja / Âmbar
+  static Color get blotch => const Color(0xFF3B82F6); // Azul Clássico
+  static Color get anthracnose => const Color(0xFF8B5CF6); // Roxo Vivo
+  static Color get brownRot => const Color(0xFF8B4513); // Castanho Couro
+  static Color get sunburned => const Color(0xFFFF6D00); // Laranja Avermelhado (Distinto do Sunburn vermelho)
+  
+  static Color get bitterRot => const Color(0xFF4E342E); // Castanho Escuro Acinzentado
+  static Color get powderyMildew => const Color(0xFFE6EE9C); // Amarelo/Verde Pálido
+  static Color get cedarAppleRust => const Color(0xFFD35400); // Laranja Escuro / Ferrugem
+  static Color get fireBlight => const Color(0xFF37474F); // Cinzento Ardido (Slate)
+  static Color get lixo => const Color(0xFFA569BD); // Roxo Desbotado (Classe de descarte)
+
   static Color get textPrimary => isDark ? const Color(0xFFE2F1EC) : Colors.black; // Soft Sage Off-White / Dark Green
   static Color get textSecondary => isDark ? const Color(0xFF8CA59D) : const Color(0xFF333333); // Sleek Sage Gray / Slate Sage
   static Color get onSurface => isDark ? Colors.white : Colors.black;
@@ -57,16 +70,22 @@ class AppColors {
 
   static Color getColorForCondition(String condition) {
     switch (condition.toLowerCase()) {
-      case 'healthy':
-        return healthy;
-      case 'rot':
-        return rot;
+      case 'healthy': return healthy;
+      case 'rot': return rot;
+      case 'sunburn': return sunburn;
+      case 'stinkbug': return stinkbug;
+      case 'frost': return frost;
+      case 'scab': return scab;
       case 'blotch':
-        return blotch;
-      case 'scab':
-        return scab;
-      case 'anthracnose':
-        return anthracnose;
+      case 'sooty blotch': return blotch;
+      case 'anthracnose': return anthracnose;
+      case 'brown rot': return brownRot;
+      case 'sunburned': return sunburned;
+      case 'bitter rot': return bitterRot;
+      case 'powdery mildew': return powderyMildew;
+      case 'cedar apple rust': return cedarAppleRust;
+      case 'fire blight': return fireBlight;
+      case 'lixo': return lixo;
       default:
         return textSecondary.withOpacity(0.2);
     }

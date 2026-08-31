@@ -4,12 +4,18 @@ import '../models/models.dart';
 
 class LocalCacheService {
   static const String cacheDir = 'local_db';
-  static const String cacheFile = '$cacheDir/apples_cache.json';
+  static const String cacheFile = '$cacheDir/apples_cache_fixed.json';
 
   static List<Apple> inMemoryApples = [];
   static bool _isLoaded = false;
 
-  /// Loads apples from the local JSON file into memory.
+  /// Cursor de sincronização incremental de `manual_review` (ver
+  /// `getManualReviewsSince` em supabase_service.dart), persistido aqui, ao
+  /// lado das maçãs, para que o polling de correções/triagem nunca precise de
+  /// refazer um SELECT * completo depois do primeiro carregamento da sessão.
+  static String? lastManualReviewSync;
+
+  /// Loads apples (and the manual_review sync cursor) from the local JSON file into memory.
   static Future<void> loadFromDisk() async {
     if (_isLoaded) return; // Only load once per session
 
@@ -23,8 +29,17 @@ class LocalCacheService {
       final jsonString = await file.readAsString();
       if (jsonString.trim().isEmpty) return;
 
-      final List<dynamic> decoded = jsonDecode(jsonString);
-      inMemoryApples = decoded.map((e) => Apple.fromJson(e as Map<String, dynamic>)).toList();
+      final decoded = jsonDecode(jsonString);
+      if (decoded is List) {
+        // Formato antigo (array simples de maçãs, sem cursor), migração
+        // silenciosa: mantém as maçãs já em cache, cursor fica null (a
+        // próxima sincronização de manual_review busca tudo uma única vez).
+        inMemoryApples = decoded.map((e) => Apple.fromJson(e as Map<String, dynamic>)).toList();
+      } else if (decoded is Map<String, dynamic>) {
+        final apples = decoded['apples'] as List? ?? [];
+        inMemoryApples = apples.map((e) => Apple.fromJson(e as Map<String, dynamic>)).toList();
+        lastManualReviewSync = decoded['lastManualReviewSync'] as String?;
+      }
       _isLoaded = true;
       print('[LocalCache] Carregadas ${inMemoryApples.length} maçãs do disco.');
     } catch (e) {
@@ -32,7 +47,7 @@ class LocalCacheService {
     }
   }
 
-  /// Saves the current in-memory apples to the local JSON file.
+  /// Saves the current in-memory apples (and manual_review sync cursor) to the local JSON file.
   static Future<void> saveToDisk() async {
     try {
       final dir = Directory(cacheDir);
@@ -45,9 +60,11 @@ class LocalCacheService {
       inMemoryApples.removeWhere((a) => a.timestamp.isBefore(thirtyDaysAgo));
 
       final file = File(cacheFile);
-      final listJson = inMemoryApples.map((a) => a.toJson()).toList();
-      final jsonString = jsonEncode(listJson);
-      
+      final jsonString = jsonEncode({
+        'apples': inMemoryApples.map((a) => a.toJson()).toList(),
+        'lastManualReviewSync': lastManualReviewSync,
+      });
+
       await file.writeAsString(jsonString);
       print('[LocalCache] Gravadas ${inMemoryApples.length} maçãs no disco.');
     } catch (e) {
@@ -95,8 +112,10 @@ class LocalCacheService {
     return latest.subtract(const Duration(minutes: 5)).toIso8601String();
   }
 
-  /// Updates a single apple's diagnosis in the memory cache and saves it to disk.
-  static void updateAppleInCache(String appleId, String newLabel) {
+  /// Updates a single apple's diagnosis in the memory cache. `persist:false`
+  /// permite aplicar várias correções em lote (ex.: sincronização periódica
+  /// de manual_review) e só gravar em disco uma vez no fim do lote.
+  static void updateAppleInCache(String appleId, String newLabel, {bool persist = true}) {
     for (int i = 0; i < inMemoryApples.length; i++) {
       if (inMemoryApples[i].id == appleId) {
         final apple = inMemoryApples[i];
@@ -127,7 +146,7 @@ class LocalCacheService {
         break;
       }
     }
-    saveToDisk();
+    if (persist) saveToDisk();
   }
 
   /// Clears the local JSON cache file and memory state.

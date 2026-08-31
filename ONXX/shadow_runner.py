@@ -27,14 +27,13 @@ import argparse
 import datetime
 from pathlib import Path
 
-SUPABASE_URL = "https://ypbqdeivphxerxgahxrd.supabase.co"
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
-if not SUPABASE_KEY:
+if not SUPABASE_URL or not SUPABASE_KEY:
     sys.exit(
-        "ERRO: define a variavel de ambiente SUPABASE_SERVICE_KEY com a tua "
-        "service_role key do projeto ypbqdeivphxerxgahxrd antes de correr "
-        "este script."
+        "ERRO: define as variaveis de ambiente SUPABASE_URL e SUPABASE_SERVICE_KEY com a tua "
+        "service_role key antes de correr este script."
     )
 
 MODELS_DIR   = Path(__file__).parent.parent / 'models'
@@ -61,8 +60,13 @@ def load_state() -> dict:
 
 
 def save_state(s: dict):
+    # Escrita atómica: o mlops_server lê este ficheiro em /shadow/status a
+    # cada poll de 2s do dashboard — um write_text direto podia ser lido a
+    # meio (JSON truncado) e regredir o estado para 'idle' transitoriamente.
     s['last_updated'] = datetime.datetime.now().isoformat()
-    STATE_PATH.write_text(json.dumps(s, indent=2))
+    tmp = STATE_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(s, indent=2))
+    os.replace(tmp, STATE_PATH)
 
 
 def load_history() -> list:
@@ -135,7 +139,11 @@ def classify_image(model, classes, device, url: str) -> tuple[str, float]:
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    resp = requests.get(url, timeout=15)
+    headers = {}
+    if SUPABASE_KEY:
+        headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'}
+    resp = requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
     img = Image.open(io.BytesIO(resp.content)).convert('RGB')
     tensor = tf(img).unsqueeze(0).to(device)
 
@@ -241,12 +249,23 @@ def auto_decide(state: dict, shadow_f1: float, shadow_acc: float) -> str:
 # Loop principal
 # ---------------------------------------------------------------------------
 
-def run(model_name: str, promote_after: int = 1000, interval: int = 30):
+def run(model_name: str, promote_after: int = 1000, interval: int = 30, simulate_count: int | None = None):
+    import random
     from supabase import create_client
     from sklearn.metrics import f1_score, accuracy_score
 
     sb     = create_client(SUPABASE_URL, SUPABASE_KEY)
     model, classes, device = load_shadow_model(model_name)
+    
+    # Obter os F1 teóricos (de treino) para mostrar no dashboard imediatamente
+    shadow_train_f1 = None
+    try:
+        meta_path = (MODELS_DIR / model_name).with_suffix('.json')
+        if meta_path.exists():
+            shadow_train_f1 = json.loads(meta_path.read_text()).get('best_f1')
+    except: pass
+    
+    prod_train_f1 = get_production_f1()
 
     state = load_state()
     state.update({
@@ -256,12 +275,103 @@ def run(model_name: str, promote_after: int = 1000, interval: int = 30):
         'accuracy': None,
         'f1': None,
         'comparison': {},
+        'theoretical_f1': {
+            'shadow': shadow_train_f1,
+            'production': prod_train_f1,
+        },
+        # Detalhe por classe e discordâncias concretas: antes só os agregados
+        # accuracy/f1 eram persistidos e o dashboard não conseguia mostrar
+        # ONDE os dois modelos divergem, só quanto.
+        'per_class_agreement': {},
+        'disagreements': [],
     })
     save_state(state)
 
     last_apple_id: str | None    = None
     all_shadow_preds: list[str]  = []
     all_true_labels:  list[str]  = []
+    disagreements: list[dict]    = []  # mais recentes primeiro, cap 50
+
+    # Lógica de Simulação de Histórico
+    if simulate_count is not None:
+        print(f'[Shadow] MODO SIMULAÇÃO: A buscar até 5000 maçãs históricas filtradas pelas classes {classes}')
+        try:
+            res = sb.table('producao_atual').select(
+                'apple_id, final_class, frame_thumbnail'
+            ).in_('final_class', classes).limit(5000).execute().data
+            
+            # Baralhar e pegar no número pedido
+            random.shuffle(res)
+            rows = res[:simulate_count]
+            print(f'[Shadow] Encontradas {len(res)} imagens válidas. Selecionadas {len(rows)} para simulação.')
+            
+            for i, row in enumerate(rows):
+                apple_id   = row['apple_id']
+                true_label = row.get('final_class', 'unknown')
+                url        = row.get('frame_thumbnail', '')
+                
+                if not url or true_label == 'unknown':
+                    continue
+                
+                try:
+                    shadow_label, conf = classify_image(model, classes, device, url)
+                    all_shadow_preds.append(shadow_label)
+                    all_true_labels.append(true_label)
+                    state['apples_processed'] += 1
+                    
+                    if shadow_label != true_label:
+                        disagreements.insert(0, {
+                            'apple_id': apple_id,
+                            'production': true_label,
+                            'shadow': shadow_label,
+                            'conf': round(float(conf) * 100, 1),
+                        })
+                        del disagreements[50:]
+                except Exception as e:
+                    print(f'[Shadow] Erro em {apple_id}: {e}')
+                
+                # Guarda estado para a dashboard acompanhar o progresso rápido
+                if state['apples_processed'] % 10 == 0 or i == len(rows) - 1:
+                    if all_true_labels:
+                        common_classes = sorted(set(all_true_labels) | set(all_shadow_preds))
+                        acc = accuracy_score(all_true_labels, all_shadow_preds)
+                        f1  = float(f1_score(all_true_labels, all_shadow_preds,
+                                             average='weighted', zero_division=0,
+                                             labels=common_classes))
+                        state['accuracy'] = round(acc * 100, 1)
+                        state['f1']       = round(f1  * 100, 1)
+                        per_class: dict[str, dict] = {}
+                        for t, s in zip(all_true_labels, all_shadow_preds):
+                            entry = per_class.setdefault(t, {'total': 0, 'agree': 0})
+                            entry['total'] += 1
+                            if t == s:
+                                entry['agree'] += 1
+                        state['per_class_agreement'] = per_class
+                        state['disagreements'] = disagreements
+                        save_state(state)
+            
+            # Fim da simulação
+            if all_true_labels:
+                acc = accuracy_score(all_true_labels, all_shadow_preds)
+                f1  = float(f1_score(all_true_labels, all_shadow_preds,
+                                     average='weighted', zero_division=0,
+                                     labels=sorted(set(all_true_labels) | set(all_shadow_preds))))
+                result = auto_decide(state, f1 * 100, acc * 100)
+                state['state'] = result
+                save_state(state)
+                print(f'[Shadow] Simulação concluída com resultado: {result}. A terminar.')
+            return
+        except Exception as e:
+            print(f'[Shadow] Erro na simulação: {e}')
+            return
+
+    # Para não processar o histórico antigo de rajada, começamos no último ID atual:
+    try:
+        latest = sb.table('producao_atual').select('apple_id').order('apple_id', desc=True).limit(1).execute().data
+        if latest:
+            last_apple_id = latest[0]['apple_id']
+    except Exception as e:
+        print(f'[Shadow] Aviso ao buscar último ID: {e}')
 
     print(f'[Shadow] A monitorizar BD a cada {interval}s. Promoção após {promote_after} maçãs.')
 
@@ -290,6 +400,14 @@ def run(model_name: str, promote_after: int = 1000, interval: int = 30):
                     all_true_labels.append(true_label)
                     state['apples_processed'] += 1
                     last_apple_id = apple_id
+                    if shadow_label != true_label:
+                        disagreements.insert(0, {
+                            'apple_id': apple_id,
+                            'production': true_label,
+                            'shadow': shadow_label,
+                            'conf': round(float(conf) * 100, 1),
+                        })
+                        del disagreements[50:]
                     print(f'[Shadow] {apple_id}: true={true_label}  shadow={shadow_label} ({conf:.2%})')
                 except Exception as e:
                     print(f'[Shadow] Erro em {apple_id}: {e}')
@@ -304,6 +422,17 @@ def run(model_name: str, promote_after: int = 1000, interval: int = 30):
 
                 state['accuracy'] = round(acc * 100, 1)
                 state['f1']       = round(f1  * 100, 1)
+
+                # Concordância por classe (chave = decisão de produção):
+                # cresce em direto durante o run, lida por /shadow/status.
+                per_class: dict[str, dict] = {}
+                for t, s in zip(all_true_labels, all_shadow_preds):
+                    entry = per_class.setdefault(t, {'total': 0, 'agree': 0})
+                    entry['total'] += 1
+                    if t == s:
+                        entry['agree'] += 1
+                state['per_class_agreement'] = per_class
+                state['disagreements'] = disagreements
 
                 if state['apples_processed'] >= promote_after:
                     result = auto_decide(state, f1 * 100, acc * 100)
@@ -330,8 +459,10 @@ def main():
                    help='Número de maçãs para considerar promoção (default 1000)')
     p.add_argument('--interval', type=int, default=30,
                    help='Segundos entre polls ao Supabase (default 30)')
+    p.add_argument('--simulate', type=int, default=None,
+                   help='Corre em modo simulação com N imagens aleatórias históricas')
     args = p.parse_args()
-    run(args.model, args.promote_after, args.interval)
+    run(args.model, args.promote_after, args.interval, args.simulate)
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/models.dart';
 import '../providers/dashboard_provider.dart';
 import '../providers/auth_provider.dart';
+import '../services/supabase_service.dart';
 import '../utils/constants.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../widgets/tech_grid_background.dart';
@@ -180,8 +181,10 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                 onPressed: (_selectedBatches.isEmpty && (_blocoController.text.isEmpty || _filaController.text.isEmpty))
                     ? null
                     : () {
+                        final String loteLocation;
                         if (_selectedBatches.isNotEmpty) {
                           ref.read(batchProvider.notifier).setBatch(_selectedBatches.first);
+                          loteLocation = _selectedBatches.first.location;
                         } else {
                           // Create a custom batch based on input
                           final customBatch = Batch(
@@ -191,14 +194,24 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                             apples: [],
                           );
                           ref.read(batchProvider.notifier).setBatch(customBatch);
+                          loteLocation = customBatch.id;
                         }
-                        
+
+                        if (user.role != UserRole.admin) {
+                          // Associa as capturas do Raspberry a este lote (o
+                          // que o antigo diálogo de lote no login fazia).
+                          // Fire-and-forget: a tabela 'active_lote' é
+                          // opcional e a falha não deve travar o arranque.
+                          SupabaseService.setActiveLote(loteLocation, setBy: user.username)
+                              .catchError((_) {});
+                        }
+
                         ref.read(sessionActiveProvider.notifier).setActive(true);
-                        
+
                         if (user.role == UserRole.admin) {
                           ref.read(currentPageProvider.notifier).setPage('Controlo do Pomar');
                         } else {
-                          ref.read(currentPageProvider.notifier).setPage('Triagem Manual');
+                          ref.read(currentPageProvider.notifier).setPage('Grelha Lote');
                         }
                       },
                 child: Text('Iniciar Triagem Manual', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold)),

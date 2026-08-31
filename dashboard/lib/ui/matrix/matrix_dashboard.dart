@@ -1,30 +1,17 @@
 
-import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
-import 'package:printing/printing.dart';
-import 'package:fl_chart/fl_chart.dart';
-import '../../models/models.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/dashboard_provider.dart';
 import '../../utils/constants.dart';
-import '../../widgets/apple_card.dart';
 import '../../widgets/donut_chart_widget.dart';
-import '../../services/pdf_service.dart';
-import '../../services/mjpeg_service.dart';
-import '../../services/supabase_service.dart';
-import '../manual/manual_sorting.dart';
-import '../batch_dashboard.dart';
-import '../global_dashboard.dart';
 import '../../widgets/apple_grid_view.dart';
-import '../../widgets/tech_grid_background.dart';
-import '../structure/dashboard_screen.dart'; // for shadowPieTouchedIndexProvider
 
-Widget buildDashboardContent(BuildContext context, WidgetRef ref) {
+class MatrixDashboardView extends ConsumerWidget {
+  const MatrixDashboardView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
     final batch = ref.watch(batchProvider);
     final filteredApples = ref.watch(filteredApplesProvider);
     final filter = ref.watch(selectedConditionFilterProvider);
@@ -102,4 +89,5 @@ Widget buildDashboardContent(BuildContext context, WidgetRef ref) {
       ),
     );
   }
+}
 

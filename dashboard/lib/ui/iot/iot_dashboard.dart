@@ -5,26 +5,17 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
-import 'package:printing/printing.dart';
-import 'package:fl_chart/fl_chart.dart';
 import '../../models/models.dart';
-import '../../providers/auth_provider.dart';
 import '../../providers/dashboard_provider.dart';
 import '../../utils/constants.dart';
-import '../../widgets/apple_card.dart';
-import '../../widgets/donut_chart_widget.dart';
-import '../../services/pdf_service.dart';
 import '../../services/mjpeg_service.dart';
-import '../../services/supabase_service.dart';
-import '../manual/manual_sorting.dart';
-import '../batch_dashboard.dart';
-import '../global_dashboard.dart';
-import '../../widgets/apple_grid_view.dart';
-import '../../widgets/tech_grid_background.dart';
 import '../structure/dashboard_screen.dart'; // for shadowPieTouchedIndexProvider
 
-Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
+class IotDashboardView extends ConsumerWidget {
+  const IotDashboardView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
     final hbAsync = ref.watch(raspberryHeartbeatProvider);
     final hb = hbAsync.value ?? RaspberryHeartbeat.offline();
 
@@ -38,9 +29,9 @@ Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
         ? (hb.mode == 'sleep' ? Colors.amber : (hb.mode == 'active' ? Colors.greenAccent : Colors.blueAccent))
         : Colors.redAccent;
     final modeLabel = switch (hb.mode) {
-      'active' => 'ATIVO — A processar',
-      'sleep'  => 'REPOUSO — Baixa resolução',
-      'idle'   => 'VIGILÂNCIA — A aguardar movimento',
+      'active' => 'ATIVO, A processar',
+      'sleep'  => 'REPOUSO, Baixa resolução',
+      'idle'   => 'VIGILÂNCIA, A aguardar movimento',
       _        => 'OFFLINE',
     };
 
@@ -91,7 +82,7 @@ Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Coluna esquerda — KPIs de sistema
+                // Coluna esquerda, KPIs de sistema
                 Expanded(
                   flex: 3,
                   child: FractionallySizedBox(
@@ -120,7 +111,7 @@ Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
               ),
                 const SizedBox(width: 14),
 
-                // Coluna central — câmara ao vivo + botão RESTART abaixo
+                // Coluna central, câmara ao vivo + botão RESTART abaixo
                 Expanded(
                   flex: 10,
                   child: Column(
@@ -139,7 +130,7 @@ Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
                 ),
                 const SizedBox(width: 14),
 
-                // Coluna direita — KPIs de câmara
+                // Coluna direita, KPIs de câmara
                 Expanded(
                   flex: 3,
                   child: FractionallySizedBox(
@@ -177,6 +168,7 @@ Widget buildIotDashboard(BuildContext context, WidgetRef ref) {
       ),
     );
   }
+}
 
 class IotVideoPanel extends StatefulWidget {
   final RaspberryHeartbeat hb;
@@ -270,7 +262,7 @@ class IotVideoPanelState extends State<IotVideoPanel> {
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Atenção: blur score baixo — verifique a lente (suja ou descalibrada)',
+                          'Atenção: blur score baixo, verifique a lente (suja ou descalibrada)',
                           style: TextStyle(
                             color: Colors.black87,
                             fontWeight: FontWeight.bold,
@@ -482,7 +474,7 @@ class IotVideoPanelState extends State<IotVideoPanel> {
 enum _DotState { idle, sending, done }
 
 // ---------------------------------------------------------------------------
-// Botão RESTART — fica abaixo da tela de livestream, canto inferior esquerdo.
+// Botão RESTART, fica abaixo da tela de livestream, canto inferior esquerdo.
 // O ponto indica o estado: preto (idle) → laranja (a reiniciar) → branco (feito).
 // Lê a configuração actual do cameraConfigProvider e envia para ws_server.py.
 // ---------------------------------------------------------------------------
@@ -499,17 +491,31 @@ class RestartButtonState extends ConsumerState<RestartButton> {
 
   Future<void> _restart() async {
     if (_dot != _DotState.idle) return;
+
+    // Pergunta se as novas configurações se tornam o padrão. Timer de 3s: se o
+    // Produtor não escolher, avança como temporário (vale só nesta sessão).
+    final makeDefault = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true, // clicar fora cancela (não aplica nada)
+      builder: (_) => const _RestartConfirmDialog(),
+    );
+    if (makeDefault == null || !mounted) return; // cancelado: nada acontece
+
     setState(() => _dot = _DotState.sending);
     try {
-      final flags = ref.read(cameraConfigProvider.notifier).state.toFlags();
+      final config = ref.read(cameraConfigProvider);
       final resp = await http
           .post(
             Uri.parse(AppConstants.commandUrl),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'type': 'restart_cmd', 'flags': flags}),
+            body: jsonEncode({'type': 'restart_cmd', 'flags': config.toFlags()}),
           )
           .timeout(const Duration(seconds: 3));
       if (resp.statusCode == 200 && mounted) {
+        // Só persiste como novo padrão se o Produtor confirmou no diálogo.
+        if (makeDefault) {
+          await ref.read(cameraConfigProvider.notifier).saveAsDefault();
+        }
         setState(() => _dot = _DotState.done);
         Future.delayed(const Duration(seconds: 3), () {
           if (mounted) setState(() => _dot = _DotState.idle);
@@ -560,7 +566,7 @@ class RestartButtonState extends ConsumerState<RestartButton> {
           ),
           const SizedBox(width: 10),
           Text(
-            'RESTART',
+            'Reiniciar',
             style: TextStyle(
               fontWeight: FontWeight.bold,
               fontSize: 11,
@@ -575,7 +581,101 @@ class RestartButtonState extends ConsumerState<RestartButton> {
 }
 
 // ---------------------------------------------------------------------------
-// Painel de configuração da câmara — flags do raspberry_camera_format.py
+// Diálogo mostrado ao clicar Reiniciar: pergunta se as configurações atuais
+// se tornam o padrão persistente. O botão 'Atualizar' (tornar padrão) fica
+// bloqueado durante 3s a contar, e só depois é clicável — dá tempo a rever a
+// escolha e evita cliques acidentais. Nada é automático: o diálogo só fecha
+// quando o Produtor clica. 'Só desta vez' aplica sem persistir (temporário).
+// ---------------------------------------------------------------------------
+
+class _RestartConfirmDialog extends StatefulWidget {
+  const _RestartConfirmDialog();
+
+  @override
+  State<_RestartConfirmDialog> createState() => _RestartConfirmDialogState();
+}
+
+class _RestartConfirmDialogState extends State<_RestartConfirmDialog> {
+  int _seconds = 3;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      setState(() => _seconds--);
+      if (_seconds <= 0) t.cancel();  // apenas destranca o botão; não fecha o diálogo
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _choose(bool makeDefault) {
+    _timer?.cancel();
+    Navigator.of(context).pop(makeDefault);
+  }
+
+  void _cancel() {
+    _timer?.cancel();
+    Navigator.of(context).pop(); // devolve null → _restart não faz nada
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final unlocked = _seconds <= 0;
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: Row(
+        children: [
+          Icon(Icons.restart_alt, color: AppColors.primary, size: 20),
+          const SizedBox(width: 8),
+          Text('Reiniciar câmara', style: TextStyle(color: AppColors.textPrimary, fontSize: 16)),
+          const Spacer(),
+          IconButton(
+            onPressed: _cancel,
+            icon: Icon(Icons.close, color: AppColors.textSecondary, size: 18),
+            tooltip: 'Cancelar',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            splashRadius: 18,
+          ),
+        ],
+      ),
+      content: Text(
+        'As novas configurações vão ser aplicadas ao reiniciar o Raspberry.\n\n'
+        'Clique em "Atualizar" para as tornar o padrão (mantêm-se ao reabrir a '
+        'dashboard). "Só desta vez" aplica-as apenas nesta sessão, voltando ao '
+        'padrão quando reabrir.',
+        style: TextStyle(color: AppColors.textSecondary, fontSize: 13, height: 1.4),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => _choose(false),
+          child: Text('Só desta vez', style: TextStyle(color: AppColors.textSecondary)),
+        ),
+        ElevatedButton.icon(
+          onPressed: unlocked ? () => _choose(true) : null,
+          icon: const Icon(Icons.refresh, size: 16),
+          label: Text(unlocked ? 'Atualizar' : 'Atualizar ($_seconds)'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: AppColors.primary.withOpacity(0.35),
+            disabledForegroundColor: Colors.white70,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Painel de configuração da câmara, flags do raspberry_camera_format.py
 // Opções básicas visíveis; avançadas reveladas com o botão ⚙
 // ---------------------------------------------------------------------------
 
@@ -587,11 +687,12 @@ class CameraConfigPanel extends ConsumerStatefulWidget {
 }
 
 class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
-  // Cópia local para responsividade dos sliders — sincronizada com o provider
+  // Cópia local para responsividade dos sliders, sincronizada com o provider
   late double _lensPosition;
   late double _burst;
   late double _burstInterval;
   late double _shutterUs;
+  late double _analogueGain;
   late double _motionThreshold;
   late double _triggerDelay;
   late double _sharpness;
@@ -604,17 +705,23 @@ class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
   @override
   void initState() {
     super.initState();
-    final c = ref.read(cameraConfigProvider.notifier).state;
-    _lensPosition = c.lensPosition;
-    _burst = c.burst;
-    _burstInterval = c.burstInterval;
-    _shutterUs = c.shutterUs;
-    _motionThreshold = c.motionThreshold;
-    _triggerDelay = c.triggerDelay;
-    _sharpness = c.sharpness;
-    _contrast = c.contrast;
-    _saturation = c.saturation;
-    _noiseReduction = c.noiseReduction;
+    _syncFrom(ref.read(cameraConfigProvider));
+  }
+
+  // Copia os valores do provider para o estado local dos sliders, clampados
+  // aos ranges da UI (a config vinda do Pi pode estar fora deles).
+  void _syncFrom(CameraConfig c) {
+    _lensPosition = c.lensPosition.clamp(0.0, 10.0);
+    _burst = c.burst.clamp(1.0, 10.0);
+    _burstInterval = c.burstInterval.clamp(50.0, 500.0);
+    _shutterUs = c.shutterUs.clamp(0.0, 20000.0);
+    _analogueGain = c.analogueGain.clamp(0.0, 12.0);
+    _motionThreshold = c.motionThreshold.clamp(100.0, 3000.0);
+    _triggerDelay = c.triggerDelay.clamp(0.0, 2000.0);
+    _sharpness = c.sharpness.clamp(0.0, 16.0);
+    _contrast = c.contrast.clamp(0.0, 32.0);
+    _saturation = c.saturation.clamp(0.0, 32.0);
+    _noiseReduction = c.noiseReduction.clamp(0.0, 2.0);
   }
 
   void _set(CameraConfig Function(CameraConfig) fn) {
@@ -628,6 +735,11 @@ class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Re-sincroniza os sliders quando o provider muda externamente (ex.: o
+    // padrão guardado é carregado do SharedPreferences no arranque).
+    ref.listen(cameraConfigProvider, (prev, next) {
+      if (mounted) setState(() => _syncFrom(next));
+    });
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
       decoration: BoxDecoration(
@@ -710,24 +822,35 @@ class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
                 ? Column(
                     children: [
                       const SizedBox(height: 4),
-                      // Linha 2: Exposição · Motion threshold · Delay
+                      // Linha 2: Exposição · Ganho ISO · Motion threshold · Delay
                       Row(
                         children: [
                           Expanded(child: _slider(
-                            'Exposição', '${_shutterUs.round()} µs',
-                            _shutterUs, 1000, 20000,
-                            (v) { setState(() => _shutterUs = v); _set((c) => c.copyWith(shutterUs: v)); },
+                            'Exposição', _shutterUs < 500 ? 'Auto' : '${_shutterUs.round()} µs',
+                            _shutterUs, 0, 20000,
+                            (v) {
+                              final stepped = (v / 1000).round() * 1000.0;
+                              setState(() => _shutterUs = stepped);
+                              _set((c) => c.copyWith(shutterUs: stepped));
+                            },
+                            divisions: 20,
                           )),
-                          const SizedBox(width: 12),
+                          const SizedBox(width: 10),
+                          Expanded(child: _slider(
+                            'Ganho ISO', _analogueGain < 0.1 ? 'Auto' : '${_analogueGain.toStringAsFixed(1)}x',
+                            _analogueGain, 0, 16,
+                            (v) { setState(() => _analogueGain = v < 0.1 ? 0 : v); _set((c) => c.copyWith(analogueGain: v < 0.1 ? 0 : v)); },
+                          )),
+                          const SizedBox(width: 10),
                           Expanded(child: _slider(
                             'Threshold mov.', '${_motionThreshold.round()} px',
-                            _motionThreshold, 1, 60,
+                            _motionThreshold, 100, 3000,
                             (v) { setState(() => _motionThreshold = v); _set((c) => c.copyWith(motionThreshold: v)); },
                           )),
-                          const SizedBox(width: 12),
+                          const SizedBox(width: 10),
                           Expanded(child: _slider(
-                            'Delay trigger', '${_triggerDelay.toStringAsFixed(2)} s',
-                            _triggerDelay, 0, 2,
+                            'Delay trigger', '${_triggerDelay.round()} ms',
+                            _triggerDelay, 0, 2000,
                             (v) { setState(() => _triggerDelay = v); _set((c) => c.copyWith(triggerDelay: v)); },
                           )),
                         ],
@@ -755,10 +878,11 @@ class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
                           )),
                           const SizedBox(width: 10),
                           Expanded(child: _slider(
-                            'Ruído (NR)', '${_noiseReduction.round()}',
-                            _noiseReduction, 0, 4,
+                            'Ruído (NR)',
+                            CameraConfig.noiseReductionModes[_noiseReduction.round().clamp(0, 2)],
+                            _noiseReduction, 0, 2,
                             (v) { setState(() => _noiseReduction = v); _set((c) => c.copyWith(noiseReduction: v)); },
-                            divisions: 4,
+                            divisions: 2,
                           )),
                         ],
                       ),
@@ -826,8 +950,3 @@ class CameraConfigPanelState extends ConsumerState<CameraConfigPanel> {
     );
   }
 }
-
-// =============================================================================
-// MLOps Page — Treino de CNN com dados do Supabase
-// =============================================================================
-

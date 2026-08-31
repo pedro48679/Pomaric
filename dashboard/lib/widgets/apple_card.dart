@@ -9,6 +9,7 @@ import '../widgets/glass_card.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/dashboard_provider.dart';
+import '../services/supabase_service.dart';
 
 class AppleCard extends ConsumerWidget {
   final Apple apple;
@@ -53,7 +54,11 @@ class AppleCard extends ConsumerWidget {
   static void showAppleDetails(BuildContext context, Apple apple) {
     final PageController pageController = PageController();
     bool showHeatmap = false;
-    
+
+    // dispose só depois de o diálogo fechar por QUALQUER caminho (botão,
+    // clique fora, Esc), dispor antes do pop deixava o PageView ainda
+    // montado durante a animação de fecho (use-after-dispose), e fechar
+    // pelo fundo nunca chegava a dispor (leak por cada abertura).
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -200,10 +205,7 @@ class AppleCard extends ConsumerWidget {
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () {
-                      pageController.dispose();
-                      Navigator.of(context).pop();
-                    },
+                    onPressed: () => Navigator.of(context).pop(),
                     child: const Text('Fechar'),
                   ),
                 )
@@ -212,7 +214,7 @@ class AppleCard extends ConsumerWidget {
           ),
         ),
       ),
-    );
+    ).then((_) => pageController.dispose());
   }
 
   @override
@@ -247,6 +249,17 @@ class AppleCard extends ConsumerWidget {
                     child: GestureDetector(
                       onTap: () {
                         ref.read(forcedTriageProvider.notifier).toggleForced(apple.id);
+                        // Fire-and-forget: o toggle local já dá feedback instantâneo;
+                        // isto persiste a decisão para ser visível a outras sessões.
+                        if (isForced) {
+                          SupabaseService.unflagForReview(apple.id);
+                          // unflagForReview apaga a linha na BD, o que é invisível ao
+                          // sync incremental por updated_at, limpar já localmente
+                          // em vez de esperar pela reconciliação periódica (~60s).
+                          ref.read(dbPendingReviewProvider.notifier).apply(remove: {apple.id});
+                        } else {
+                          SupabaseService.flagForReview(apple);
+                        }
                         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                           content: Text(isForced ? 'Removido da triagem.' : 'Enviado para triagem manual.'),
                           duration: const Duration(seconds: 1),
@@ -290,9 +303,13 @@ class AppleCard extends ConsumerWidget {
                   ),
                   if ((apple.worstFrame?.probabilities.length ?? 0) > 1) ...[
                     const SizedBox(height: 4),
-                    ...apple.worstFrame!.probabilities.entries.where((e) => e.value > 0.05).map((e) => Text(
+                    ...(apple.worstFrame!.probabilities.entries.where((e) => e.value > 0.05).toList()..sort((a, b) => b.value.compareTo(a.value))).map((e) => Text(
                       '${e.key}: ${(e.value * 100).toStringAsFixed(1)}%',
-                      style: TextStyle(color: AppColors.getColorForCondition(e.key), fontSize: 9, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        color: AppColors.getColorForCondition(e.key), 
+                        fontSize: e.key == apple.primaryCondition ? 11 : 9, 
+                        fontWeight: e.key == apple.primaryCondition ? FontWeight.w900 : FontWeight.bold
+                      ),
                     )),
                   ],
                   const SizedBox(height: 6),
