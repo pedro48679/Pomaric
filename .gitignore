@@ -54,19 +54,6 @@ scrappa/
 TempRaspberry/
 _rejeitadas/
 
-# ------------------------------------------------------------------------------
-# 4. Ficheiros Auxiliares LaTeX e Rascunhos de Documentação
-# ------------------------------------------------------------------------------
-*.aux
-*.toc
-*.out
-*.bbl
-*.blg
-*.fls
-*.fdb_latexmk
-*.synctex.gz
-*.log
-
 # Rascunhos markdown de progresso / ideias
 casos_uso_bruto_plantuml.md
 diagramas_seq.md
@@ -94,16 +81,3 @@ ONXX/raspberry_camera_format.py
 # Ficheiros .service com referências ao projeto Supabase
 ONXX/pomaric-camera.service
 ONXX/pomaric-camera_new.service
-
-# ------------------------------------------------------------------------------
-# 6. IDEs, Editores e Sistema Operativo
-# ------------------------------------------------------------------------------
-.vscode/
-.idea/
-.claude/
-.cursor/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-desktop.ini
