@@ -214,14 +214,35 @@ The dashboard automatically flags critical crop batches using the formula:
 
 ---
 
-## 7. Installation
+## 7. Future Upgrades & Hardware Considerations
+
+There were some restrictions with the hardware; in the future, these as well as other components could be changed or implemented:
+
+### 7.1. Global Shutter Camera
+The current rolling-shutter camera was prone to motion blur and blurred objects on the moving conveyor, requiring burst captures to filter out blurry frames. Replacing it with a global shutter camera would freeze motion instantly, delivering consistently sharp images that directly improve CNN accuracy on subtle lesions.
+
+### 7.2. Edge Microprocessor Optimization
+While the Raspberry Pi 5 was chosen for development speed and high CPU throughput, there is no strict need for it. The quantized INT8 ONNX model could easily run on a cheaper and weaker microprocessor or microcontroller, significantly lowering hardware costs across multiple sorting lanes even if inference runs somewhat slower.
+
+### 7.3. 360° Inspection & Lens Protection
+A single overhead camera cannot inspect the bottom of the fruit resting on the belt, so adding multiple synchronized cameras around the conveyor would provide full surface coverage. Mounting a protective transparent shield over the lens would also prevent lens fouling from organic dust and fruit wax over time.
+
+### 7.4. Outlier Rejection for Unseen Pathologies
+Standard Softmax tends to classify unfamiliar diseases into known categories with misleadingly high confidence. Adding an explicit outlier rejection check would ensure novel pathologies are safely flagged and escalated to human operators rather than being misclassified.
+
+### 7.5. Lesion Segmentation (Patch-based Extraction)
+Transitioning from whole-image classification to lesion segmentation (Patch-based Extraction) would divide an apple with multiple diseased spots into individual lesion patches. This multiplies the available training data from scarce diseased fruit and enables measuring the exact percentage of damaged surface area for automated commercial grading.
+
+---
+
+## 8. Installation
 
 **PC side (training, `ws_server`, `cnn5_watcher`, `mlops_server`, `inference_server`):**
 
 ```powershell
 python -m venv venv
 ./venv/Scripts/activate
-# GPU (recommended for training + cnn5_watcher — plain "pip install torch" is CPU-only):
+# GPU (recommended for training + cnn5_watcher, as plain "pip install torch" is CPU-only):
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
@@ -230,7 +251,7 @@ pip install -r requirements.txt
 
 **Credentials setup (one-time)**: fill in `secrets.local.ps1` at the repo root with `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_KEY`. `start_all.ps1` loads it automatically. The file is never committed (the whitelist `.gitignore` excludes everything not explicitly allowed; verify with `git check-ignore secrets.local.ps1`). Alternatively, set the same three `$env:` variables per session by hand.
 
-**Raspberry Pi (edge capture, ONNX-only — no PyTorch):** see `ONXX/requirements_export.txt` and `ONXX/raspberry.md`.
+**Raspberry Pi (edge capture, ONNX-only, no PyTorch):** see `ONXX/requirements_export.txt` and `ONXX/raspberry.md`.
 
 **Dashboard (Flutter):**
 
@@ -250,11 +271,11 @@ See [`dashboard/README.md`](dashboard/README.md) for the full `--dart-define` se
 
 ---
 
-## 8. Running the System
+## 9. Running the System
 
 ```powershell
 # PC side: ws_server, mlops_server, cnn5_watcher (background) + Flutter dashboard (foreground)
-# Credentials come from secrets.local.ps1 (loaded automatically) or session env vars — see Installation
+# Credentials come from secrets.local.ps1 (loaded automatically) or session env vars. See Installation.
 ./start_all.ps1                       # defaults to -Device windows
 ./start_all.ps1 -Device chrome        # or any other flutter device
 
